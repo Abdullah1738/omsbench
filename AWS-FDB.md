@@ -27,8 +27,10 @@ export K8S_VERSION=1.30
 export NODE_INSTANCE_TYPE=c7i.4xlarge
 export NODE_COUNT=6
 export FDB_VERSION=7.3.28
-export FDB_OPERATOR_VERSION=1.54.1
+export FDB_OPERATOR_VERSION=v2.15.0  # pin to a published operator release tag
 ```
+
+Review the operator’s release page to confirm the tag before applying manifests.citeturn0search4
 
 ---
 
@@ -158,13 +160,36 @@ kubectl get nodes -o wide
 
 ## 6. Install the FoundationDB Kubernetes Operator
 
-```bash
-curl -L -o fdb-operator.yaml \
-  https://github.com/FoundationDB/fdb-kubernetes-operator/releases/download/v${FDB_OPERATOR_VERSION}/fdb-kubernetes-operator.yaml
+The operator maintainers recommend installing the CRDs and controller from a tagged release rather than `main`. Adjust `FDB_OPERATOR_VERSION` if a newer release appears on the project’s GitHub releases page.citeturn0search0
 
-kubectl apply -f fdb-operator.yaml
-kubectl -n foundationdb-system rollout status deployment/fdb-operator --timeout=5m
+```bash
+kubectl create namespace foundationdb-system
+
+kubectl apply -f https://raw.githubusercontent.com/FoundationDB/fdb-kubernetes-operator/${FDB_OPERATOR_VERSION}/config/crd/bases/apps.foundationdb.org_foundationdbclusters.yaml
+kubectl apply -f https://raw.githubusercontent.com/FoundationDB/fdb-kubernetes-operator/${FDB_OPERATOR_VERSION}/config/crd/bases/apps.foundationdb.org_foundationdbbackups.yaml
+kubectl apply -f https://raw.githubusercontent.com/FoundationDB/fdb-kubernetes-operator/${FDB_OPERATOR_VERSION}/config/crd/bases/apps.foundationdb.org_foundationdbrestores.yaml
+
+curl -sL https://raw.githubusercontent.com/FoundationDB/fdb-kubernetes-operator/${FDB_OPERATOR_VERSION}/config/samples/deployment.yaml \
+  # requires yq v4 (https://github.com/mikefarah/yq) to rewrite namespace fields
+  | yq '
+      (.metadata.namespace // "") |=
+        (if . == "" then "foundationdb-system" else . end) |
+      (.items[]? // .) |=
+        (if has("metadata") and
+            ((.kind == "ServiceAccount") or
+             (.kind == "Deployment") or
+             (.kind == "RoleBinding") or
+             (.kind == "ClusterRoleBinding")) then
+           (.metadata.namespace = "foundationdb-system")
+         else . end)
+    ' \
+  | kubectl apply -f -
+
+kubectl -n foundationdb-system rollout status deployment/fdb-kubernetes-operator-controller-manager --timeout=5m
+kubectl -n foundationdb-system logs -f -l app=fdb-kubernetes-operator-controller-manager --container=manager
 ```
+
+Monitor the operator logs until the controller reports it is watching the cluster. When you later change a `FoundationDBCluster`, ensure `status.generations.reconciled` catches up with `metadata.generation` before proceeding to the next step.citeturn0search2
 
 ---
 
