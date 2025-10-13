@@ -16,83 +16,41 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-const (
-	defaultWarmupConnections = 4000
-	defaultWarmupParallel    = 200
-	defaultWarmupKeepAlive   = 30 * time.Second
-	defaultWarmupRate        = 100.0
-)
-
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "missing subcommand (warmup|run)\n")
-		os.Exit(2)
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	cmd := os.Args[1]
-	switch cmd {
-	case "warmup":
-		runWarmup(ctx, os.Args[2:])
+	args := os.Args[1:]
+	if len(args) == 0 {
+		runBenchmark(ctx, args)
+		return
+	}
+
+	switch args[0] {
 	case "run":
-		runBenchmark(ctx, os.Args[2:])
+		runBenchmark(ctx, args[1:])
+	case "warmup":
+		log.Println("FoundationDB benchmark does not require a warmup phase; exiting.")
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n", args[0])
 		os.Exit(2)
-	}
-}
-
-func runWarmup(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("warmup", flag.ExitOnError)
-	dsn := fs.String("dsn", "", "PostgreSQL connection string targeting Aurora DSQL")
-	connections := fs.Int("connections", defaultWarmupConnections, "Number of connections to keep warm")
-	parallel := fs.Int("parallel", defaultWarmupParallel, "Number of concurrent connection attempts")
-	keepAlive := fs.Duration("keepalive", defaultWarmupKeepAlive, "Interval between keep-alive probes")
-	queryTimeout := fs.Duration("query-timeout", 5*time.Second, "Timeout per warmup query")
-	maxRate := fs.Float64("connect-rate", defaultWarmupRate, "Maximum connection attempts per second")
-	if err := fs.Parse(args); err != nil {
-		log.Fatalf("failed to parse flags: %v", err)
-	}
-
-	if strings.TrimSpace(*dsn) == "" {
-		log.Fatalf("--dsn is required")
-	}
-
-	cfg := bench.WarmupConfig{
-		DSN:            *dsn,
-		Connections:    *connections,
-		Parallelism:    *parallel,
-		MaxConnectRate: *maxRate,
-		KeepAlive:      *keepAlive,
-		QueryTimeout:   *queryTimeout,
-		Logger:         log.New(os.Stdout, "[warmup] ", log.LstdFlags|log.Lmicroseconds),
-		ShutdownSignal: make(chan struct{}),
-	}
-
-	if err := bench.RunWarmup(ctx, cfg); err != nil {
-		log.Fatalf("warmup failed: %v", err)
 	}
 }
 
 func runBenchmark(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	dsn := fs.String("dsn", "", "PostgreSQL connection string targeting Aurora DSQL")
+	clusterFile := fs.String("cluster-file", "", "Path to FoundationDB cluster file; defaults to FDB_CLUSTER_FILE env var")
+	apiVersion := fs.Int("api-version", bench.DefaultAPIVersion, "FoundationDB API version to negotiate")
+	namespace := fs.String("namespace", "omsbench", "Slash- or dot-delimited subspace namespace for benchmark keys")
 	targetTPS := fs.Float64("tps", 120000, "Target transactions per second")
 	workers := fs.Int("workers", 512, "Number of concurrent workers issuing transactions")
 	duration := fs.Duration("duration", 15*time.Minute, "Benchmark duration")
 	metricsAddr := fs.String("metrics-addr", ":2112", "Prometheus metrics listen address")
 	histBuckets := fs.String("histogram-buckets", "0.001,0.005,0.01,0.02,0.04,0.08,0.16", "Comma-separated histogram buckets in seconds")
-	queryTimeout := fs.Duration("query-timeout", 5*time.Second, "Timeout per transactional round trip")
+	txTimeout := fs.Duration("tx-timeout", 5*time.Second, "Timeout per FoundationDB transaction")
 	randSeed := fs.Int64("seed", time.Now().UnixNano(), "Random seed for deterministic runs")
-	maxConns := fs.Int("max-conns", 4096, "Maximum open connections in the pool")
 	if err := fs.Parse(args); err != nil {
 		log.Fatalf("failed to parse flags: %v", err)
-	}
-
-	if strings.TrimSpace(*dsn) == "" {
-		log.Fatalf("--dsn is required")
 	}
 
 	registry := bench.NewRegistry()
@@ -114,15 +72,16 @@ func runBenchmark(ctx context.Context, args []string) {
 	}()
 
 	cfg := bench.RunConfig{
-		DSN:             *dsn,
+		ClusterFile:     *clusterFile,
+		DirectoryPath:   parseNamespace(*namespace),
+		APIVersion:      *apiVersion,
 		TargetTPS:       *targetTPS,
 		Workers:         *workers,
 		Duration:        *duration,
 		HistogramConfig: *histBuckets,
-		QueryTimeout:    *queryTimeout,
+		TxTimeout:       *txTimeout,
 		Logger:          log.New(os.Stdout, "[run] ", log.LstdFlags|log.Lmicroseconds),
 		RandSeed:        *randSeed,
-		MaxConnections:  *maxConns,
 		Registry:        registry,
 	}
 
@@ -137,4 +96,30 @@ func runBenchmark(ctx context.Context, args []string) {
 	if err != nil {
 		log.Fatalf("benchmark failed: %v", err)
 	}
+}
+
+func parseNamespace(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+
+	fields := strings.FieldsFunc(trimmed, func(r rune) bool {
+		switch r {
+		case '/', '.', ':':
+			return true
+		default:
+			return false
+		}
+	})
+
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		out = append(out, field)
+	}
+	return out
 }

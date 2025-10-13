@@ -1,13 +1,8 @@
 package bench
 
 import (
-	"context"
-	"math/rand"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/pashagolub/pgxmock/v4"
 )
 
 func TestParseBuckets(t *testing.T) {
@@ -28,58 +23,45 @@ func TestParseBuckets(t *testing.T) {
 }
 
 func TestParseBucketsErrors(t *testing.T) {
-	tests := []string{
+	t.Parallel()
+
+	cases := []string{
 		"",
 		"0.02,0.01",
 		"a,b",
 	}
-	for _, tc := range tests {
-		if _, err := parseBuckets(tc); err == nil {
-			t.Fatalf("expected error for %q", tc)
-		}
-	}
-}
-
-func TestValidateWarmupConfig(t *testing.T) {
-	valid := WarmupConfig{
-		DSN:            "postgres://user:pass@localhost/db",
-		Connections:    10,
-		Parallelism:    2,
-		MaxConnectRate: 50,
-		KeepAlive:      time.Second,
-		QueryTimeout:   time.Second,
-		Logger:         testLogger{t},
-	}
-	if err := validateWarmupConfig(valid); err != nil {
-		t.Fatalf("expected valid config, got %v", err)
-	}
-
-	invalid := valid
-	invalid.DSN = ""
-	if err := validateWarmupConfig(invalid); err == nil {
-		t.Fatalf("expected error for missing DSN")
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc, func(t *testing.T) {
+			t.Parallel()
+			if _, err := parseBuckets(tc); err == nil {
+				t.Fatalf("expected error for %q", tc)
+			}
+		})
 	}
 }
 
 func TestValidateRunConfig(t *testing.T) {
-	valid := RunConfig{
-		DSN:             "postgres://user:pass@localhost/db",
+	cfg := RunConfig{
+		ClusterFile:     "",
+		DirectoryPath:   []string{"test"},
 		TargetTPS:       1,
 		Workers:         1,
 		Duration:        time.Second,
 		HistogramConfig: "0.01,0.1",
-		QueryTimeout:    time.Second,
+		TxTimeout:       time.Second,
 		Logger:          testLogger{t},
+		RandSeed:        1,
 		Registry:        NewRegistry(),
 	}
-	if err := validateRunConfig(valid); err != nil {
-		t.Fatalf("expected valid config, got %v", err)
+
+	if err := validateRunConfig(cfg); err != nil {
+		t.Fatalf("expected config to validate, got %v", err)
 	}
 
-	invalid := valid
-	invalid.Workers = 0
-	if err := validateRunConfig(invalid); err == nil {
-		t.Fatalf("expected error for workers")
+	cfg.Workers = 0
+	if err := validateRunConfig(cfg); err == nil {
+		t.Fatalf("expected validation error for workers")
 	}
 }
 
@@ -95,48 +77,20 @@ func TestShouldLogFailure(t *testing.T) {
 	}
 }
 
-func TestPerformOrder(t *testing.T) {
-	mockPool, err := pgxmock.NewPool()
-	if err != nil {
-		t.Fatalf("pgxmock: %v", err)
-	}
-	defer mockPool.Close()
-
-	mockPool.ExpectBegin()
-	mockPool.ExpectExec(`INSERT INTO core\.orders`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), "pending", pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	mockPool.ExpectExec(`UPDATE core\.balances`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mockPool.ExpectExec(`INSERT INTO core\.positions`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	mockPool.ExpectExec(`UPDATE core\.balances`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mockPool.ExpectExec(`UPDATE core\.orders`).
-		WithArgs("accepted", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mockPool.ExpectRollback()
-
-	ctx := context.Background()
-	tx, err := mockPool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		t.Fatalf("begin tx: %v", err)
+func TestNormalizeDirectory(t *testing.T) {
+	dir := normalizeDirectory(nil)
+	if len(dir) != 1 || dir[0] == "" {
+		t.Fatalf("expected default directory, got %v", dir)
 	}
 
-	rng := rand.New(rand.NewSource(123))
-	if err := performOrder(ctx, tx, 42, rng); err != nil {
-		t.Fatalf("performOrder: %v", err)
+	dir = normalizeDirectory([]string{"a", "b"})
+	if len(dir) != 2 || dir[0] != "a" || dir[1] != "b" {
+		t.Fatalf("unexpected result: %v", dir)
 	}
 
-	if err := tx.Rollback(ctx); err != nil {
-		t.Fatalf("rollback: %v", err)
-	}
-
-	if err := mockPool.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet expectations: %v", err)
+	dir = normalizeDirectory([]string{" ", "a ", ""})
+	if len(dir) != 1 || dir[0] != "a" {
+		t.Fatalf("unexpected result after trimming: %v", dir)
 	}
 }
 
