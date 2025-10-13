@@ -308,7 +308,7 @@ Generate a production-tuned cluster manifest. The repo already includes `fdb-clu
 Key production levers (baked into `fdb-cluster.yaml`):
 
 - `storageServersPerPod` / `logServersPerPod` multiply storage and log processes per pod, yielding the 18 storage and 12 log processes required for sustained I/O without creating dozens of extra pods.
-- High `RoleCounts` for proxies, commit proxies, resolvers, and log routers keep the transaction pipeline wide enough for six-figure TPS; FoundationDB’s architecture scales write throughput by recruiting additional processes for those roles.
+- Higher `processCounts` for proxies, commit proxies, resolvers, and log routers keep the transaction pipeline wide enough for six-figure TPS; FoundationDB’s architecture scales write throughput by recruiting additional processes for those roles.
 - Elevated CPU/memory reservations for the main and sidecar containers ensure each pod stays CPU scheduled under load.
 
 Apply and watch status:

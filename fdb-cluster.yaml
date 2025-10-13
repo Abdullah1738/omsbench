@@ -27,14 +27,6 @@ spec:
             priority: 1
           - id: az-c
             priority: 1
-    roleCounts:
-      storage: 18
-      logs: 12
-      proxies: 12
-      commit_proxies: 12
-      grv_proxies: 6
-      resolvers: 6
-      log_routers: 12
   labels:
     matchLabels:
       foundationdb.org/fdb-cluster-name: fdb-oms
