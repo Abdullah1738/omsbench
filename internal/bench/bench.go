@@ -90,7 +90,7 @@ func RunWarmup(ctx context.Context, cfg WarmupConfig) error {
 	}
 	defer pool.Close()
 
-	cfg.Logger.Printf("warming %d connections (parallelism=%d)", cfg.Connections, cfg.Parallelism)
+	cfg.Logger.Printf("warming %d connections (parallelism=%d) connect rate=%f", cfg.Connections, cfg.Parallelism, cfg.MaxConnectRate)
 
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(cfg.Parallelism)
