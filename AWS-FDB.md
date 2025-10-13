@@ -30,11 +30,71 @@ export FDB_VERSION=7.3.28
 export FDB_OPERATOR_VERSION=v2.15.0  # pin to a published operator release tag
 ```
 
+Create a helper script so you can restore the variables after opening a new shell:
+
+```bash
+cat <<EOF > env.fdb
+export AWS_REGION=${AWS_REGION}
+export CLUSTER_NAME=${CLUSTER_NAME}
+export VPC_CIDR=${VPC_CIDR}
+export SUBNET1_CIDR=${SUBNET1_CIDR}
+export SUBNET2_CIDR=${SUBNET2_CIDR}
+export SUBNET3_CIDR=${SUBNET3_CIDR}
+export AZ1=${AZ1}
+export AZ2=${AZ2}
+export AZ3=${AZ3}
+export K8S_VERSION=${K8S_VERSION}
+export NODE_INSTANCE_TYPE=${NODE_INSTANCE_TYPE}
+export NODE_COUNT=${NODE_COUNT}
+export FDB_VERSION=${FDB_VERSION}
+export FDB_OPERATOR_VERSION=${FDB_OPERATOR_VERSION}
+EOF
+chmod +x env.fdb
+echo "To restore later, run: source env.fdb"
+```
+
 Review the operator’s release page to confirm the tag before applying manifests.citeturn0search4
 
 ---
 
 ## 2. Networking (VPC + Subnets)
+
+### 2.Resume
+```bash
+source env.fdb 2>/dev/null || true
+
+# Recreate IDs if the environment is empty
+export VPC_ID=$(aws ec2 describe-vpcs \
+  --filters Name=tag:Name,Values=${CLUSTER_NAME}-vpc \
+  --query 'Vpcs[0].VpcId' --output text)
+
+export IGW_ID=$(aws ec2 describe-internet-gateways \
+  --filters Name=attachment.vpc-id,Values=${VPC_ID} \
+  --query 'InternetGateways[0].InternetGatewayId' --output text)
+
+export ROUTE_TABLE_ID=$(aws ec2 describe-route-tables \
+  --filters Name=vpc-id,Values=${VPC_ID} Name=tag:Name,Values=${CLUSTER_NAME}-rt \
+  --query 'RouteTables[0].RouteTableId' --output text)
+
+export SUBNET1_ID=$(aws ec2 describe-subnets \
+  --filters Name=vpc-id,Values=${VPC_ID} Name=tag:Name,Values=${CLUSTER_NAME}-subnet-a \
+  --query 'Subnets[0].SubnetId' --output text)
+export SUBNET2_ID=$(aws ec2 describe-subnets \
+  --filters Name=vpc-id,Values=${VPC_ID} Name=tag:Name,Values=${CLUSTER_NAME}-subnet-b \
+  --query 'Subnets[0].SubnetId' --output text)
+export SUBNET3_ID=$(aws ec2 describe-subnets \
+  --filters Name=vpc-id,Values=${VPC_ID} Name=tag:Name,Values=${CLUSTER_NAME}-subnet-c \
+  --query 'Subnets[0].SubnetId' --output text)
+
+cat <<EOF >> env.fdb
+export VPC_ID=${VPC_ID}
+export IGW_ID=${IGW_ID}
+export ROUTE_TABLE_ID=${ROUTE_TABLE_ID}
+export SUBNET1_ID=${SUBNET1_ID}
+export SUBNET2_ID=${SUBNET2_ID}
+export SUBNET3_ID=${SUBNET3_ID}
+EOF
+```
 
 ```bash
 VPC_ID=$(aws ec2 create-vpc \
@@ -81,6 +141,27 @@ done
 
 ## 3. IAM Roles for EKS
 
+### 3.Resume
+```bash
+source env.fdb 2>/dev/null || true
+
+export CLUSTER_ROLE_ARN=$(aws iam get-role \
+  --role-name ${CLUSTER_NAME}-eks-cluster-role \
+  --query 'Role.Arn' --output text)
+
+export NODE_ROLE_ARN=$(aws iam get-role \
+  --role-name ${CLUSTER_NAME}-eks-node-role \
+  --query 'Role.Arn' --output text)
+
+export NODE_INSTANCE_PROFILE=${CLUSTER_NAME}-eks-node-profile
+
+cat <<EOF >> env.fdb
+export CLUSTER_ROLE_ARN=${CLUSTER_ROLE_ARN}
+export NODE_ROLE_ARN=${NODE_ROLE_ARN}
+export NODE_INSTANCE_PROFILE=${NODE_INSTANCE_PROFILE}
+EOF
+```
+
 ```bash
 CLUSTER_ROLE_ARN=$(aws iam create-role \
   --role-name ${CLUSTER_NAME}-eks-cluster-role \
@@ -112,6 +193,19 @@ aws iam add-role-to-instance-profile --instance-profile-name ${CLUSTER_NAME}-eks
 
 ## 4. Create the EKS Control Plane
 
+### 4.Resume
+```bash
+source env.fdb 2>/dev/null || true
+
+export EKS_ENDPOINT=$(aws eks describe-cluster \
+  --name ${CLUSTER_NAME} --region ${AWS_REGION} \
+  --query 'cluster.endpoint' --output text 2>/dev/null || true)
+
+cat <<EOF >> env.fdb
+export EKS_ENDPOINT=${EKS_ENDPOINT}
+EOF
+```
+
 ```bash
 aws eks create-cluster \
   --name "$CLUSTER_NAME" \
@@ -132,6 +226,16 @@ aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
 ---
 
 ## 5. Managed Node Group
+
+### 5.Resume
+```bash
+source env.fdb 2>/dev/null || true
+
+export NODEGROUP_NAME=${CLUSTER_NAME}-primary-ng
+cat <<EOF >> env.fdb
+export NODEGROUP_NAME=${NODEGROUP_NAME}
+EOF
+```
 
 ```bash
 aws eks create-nodegroup \
@@ -159,6 +263,13 @@ kubectl get nodes -o wide
 ---
 
 ## 6. Install the FoundationDB Kubernetes Operator
+
+### 6.Resume
+```bash
+source env.fdb 2>/dev/null || true
+
+kubectl config set-context --current --namespace=foundationdb-system >/dev/null 2>&1 || true
+```
 
 The operator maintainers recommend installing the CRDs and controller from a tagged release rather than `main`. Adjust `FDB_OPERATOR_VERSION` if a newer release appears on the project’s GitHub releases page.citeturn0search0
 
@@ -194,6 +305,16 @@ Monitor the operator logs until the controller reports it is watching the cluste
 ---
 
 ## 7. Deploy a Multi-AZ FoundationDB Cluster
+
+### 7.Resume
+```bash
+source env.fdb 2>/dev/null || true
+
+export FDB_CLUSTER_NS=foundationdb-system
+cat <<EOF >> env.fdb
+export FDB_CLUSTER_NS=${FDB_CLUSTER_NS}
+EOF
+```
 
 Create the cluster manifest:
 
@@ -276,6 +397,30 @@ echo "FoundationDB public service: $FDB_LB"
 
 ## 8. Provision the Benchmark EC2 Host
 
+### 8.Resume
+```bash
+source env.fdb 2>/dev/null || true
+
+export SG_ID=$(aws ec2 describe-security-groups \
+  --filters Name=vpc-id,Values=${VPC_ID} Name=group-name,Values=${CLUSTER_NAME}-bench-sg \
+  --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
+
+export BENCH_INSTANCE_ID=$(aws ec2 describe-instances \
+  --filters Name=tag:Name,Values=${CLUSTER_NAME}-bench Name=instance-state-name,Values=running,stopped \
+  --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || true)
+
+if [ -n "${BENCH_INSTANCE_ID}" ] && [ "${BENCH_INSTANCE_ID}" != "None" ]; then
+  export BENCH_PUBLIC_IP=$(aws ec2 describe-instances --instance-ids ${BENCH_INSTANCE_ID} \
+    --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+fi
+
+cat <<EOF >> env.fdb
+export SG_ID=${SG_ID}
+export BENCH_INSTANCE_ID=${BENCH_INSTANCE_ID}
+export BENCH_PUBLIC_IP=${BENCH_PUBLIC_IP}
+EOF
+```
+
 1. **Security group** (allow FDB + metrics):
    ```bash
    SG_ID=$(aws ec2 create-security-group \
@@ -328,6 +473,20 @@ scp -i ${CLUSTER_NAME}-bench.pem fdb.cluster ec2-user@${BENCH_PUBLIC_IP}:/home/e
 
 ## 9. Build and Run the Benchmark
 
+### 9.Resume
+```bash
+source env.fdb 2>/dev/null || true
+
+if [ -z "${BENCH_PUBLIC_IP}" ] || [ "${BENCH_PUBLIC_IP}" = "None" ]; then
+  export BENCH_PUBLIC_IP=$(aws ec2 describe-instances --filters Name=tag:Name,Values=${CLUSTER_NAME}-bench \
+    --query 'Reservations[0].Instances[0].PublicIpAddress' --output text 2>/dev/null || true)
+fi
+
+cat <<EOF >> env.fdb
+export BENCH_PUBLIC_IP=${BENCH_PUBLIC_IP}
+EOF
+```
+
 On the EC2 host:
 
 ```bash
@@ -367,6 +526,11 @@ FDB_CLUSTER_FILE=/home/ec2-user/fdb.cluster
 
 ## 10. Observability (p50/p99 Latency)
 
+### 10.Resume
+```bash
+source env.fdb 2>/dev/null || true
+```
+
 The benchmark exposes Prometheus-format metrics on port `2112`.
 
 ```bash
@@ -388,6 +552,11 @@ You can scrape the endpoint with Amazon Managed Service for Prometheus or deploy
 
 ## 11. Tuning for 100k–500k TPS
 
+### 11.Resume
+```bash
+source env.fdb 2>/dev/null || true
+```
+
 - **FDB topology**: triple redundancy with at least 6 storage and 6 log processes across three AZs. Increase process counts (e.g. 12 storage / 8 log) if CPU or disk usage exceeds 70%.
 - **Resource sizing**: `c7i.8xlarge` EC2 benchmark host uses 32 vCPU; raise to `c7i.12xlarge` if per-core saturation occurs.
 - **FDB ratekeeper**: Watch the `foundationdb` status (`kubectl get fdb -o yaml | jq '.status.health.ratekeeper'`). If throttling occurs, raise `processCounts`, storage volumes, or scale out the node group.
@@ -397,6 +566,11 @@ You can scrape the endpoint with Amazon Managed Service for Prometheus or deploy
 ---
 
 ## 12. Cleanup
+
+### 12.Resume
+```bash
+source env.fdb 2>/dev/null || true
+```
 
 ```bash
 aws ec2 terminate-instances --instance-ids "$BENCH_INSTANCE_ID"
@@ -422,6 +596,11 @@ rm -f ${CLUSTER_NAME}-bench.pem fdb.cluster
 ---
 
 ## 13. Next Steps
+
+### 13.Resume
+```bash
+source env.fdb 2>/dev/null || true
+```
 
 - Integrate the Prometheus endpoint with Amazon Managed Service for Prometheus or AMP/AMG dashboards.
 - Use AWS FIS (Fault Injection Simulator) to test FoundationDB resilience across AZ disruptions.
