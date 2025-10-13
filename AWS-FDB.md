@@ -280,21 +280,8 @@ kubectl apply -f https://raw.githubusercontent.com/FoundationDB/fdb-kubernetes-o
 kubectl apply -f https://raw.githubusercontent.com/FoundationDB/fdb-kubernetes-operator/${FDB_OPERATOR_VERSION}/config/crd/bases/apps.foundationdb.org_foundationdbbackups.yaml
 kubectl apply -f https://raw.githubusercontent.com/FoundationDB/fdb-kubernetes-operator/${FDB_OPERATOR_VERSION}/config/crd/bases/apps.foundationdb.org_foundationdbrestores.yaml
 
-curl -sL https://raw.githubusercontent.com/FoundationDB/fdb-kubernetes-operator/${FDB_OPERATOR_VERSION}/config/samples/deployment.yaml \
-  # requires yq v4 (https://github.com/mikefarah/yq) to rewrite namespace fields
-  | yq '
-      (.metadata.namespace // "") |=
-        (if . == "" then "foundationdb-system" else . end) |
-      (.items[]? // .) |=
-        (if has("metadata") and
-            ((.kind == "ServiceAccount") or
-             (.kind == "Deployment") or
-             (.kind == "RoleBinding") or
-             (.kind == "ClusterRoleBinding")) then
-           (.metadata.namespace = "foundationdb-system")
-         else . end)
-    ' \
-  | kubectl apply -f -
+kubectl apply -n foundationdb-system \
+    -f https://raw.githubusercontent.com/FoundationDB/fdb-kubernetes-operator/${FDB_OPERATOR_VERSION}/config/samples/deployment.yaml
 
 kubectl -n foundationdb-system rollout status deployment/fdb-kubernetes-operator-controller-manager --timeout=5m
 kubectl -n foundationdb-system logs -f -l app=fdb-kubernetes-operator-controller-manager --container=manager
