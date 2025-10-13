@@ -20,6 +20,7 @@ const (
 	defaultWarmupConnections = 4000
 	defaultWarmupParallel    = 200
 	defaultWarmupKeepAlive   = 30 * time.Second
+	defaultWarmupRate        = 100.0
 )
 
 func main() {
@@ -50,6 +51,7 @@ func runWarmup(ctx context.Context, args []string) {
 	parallel := fs.Int("parallel", defaultWarmupParallel, "Number of concurrent connection attempts")
 	keepAlive := fs.Duration("keepalive", defaultWarmupKeepAlive, "Interval between keep-alive probes")
 	queryTimeout := fs.Duration("query-timeout", 5*time.Second, "Timeout per warmup query")
+	maxRate := fs.Float64("connect-rate", defaultWarmupRate, "Maximum connection attempts per second")
 	if err := fs.Parse(args); err != nil {
 		log.Fatalf("failed to parse flags: %v", err)
 	}
@@ -62,6 +64,7 @@ func runWarmup(ctx context.Context, args []string) {
 		DSN:            *dsn,
 		Connections:    *connections,
 		Parallelism:    *parallel,
+		MaxConnectRate: *maxRate,
 		KeepAlive:      *keepAlive,
 		QueryTimeout:   *queryTimeout,
 		Logger:         log.New(os.Stdout, "[warmup] ", log.LstdFlags|log.Lmicroseconds),

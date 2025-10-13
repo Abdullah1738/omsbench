@@ -42,12 +42,13 @@ func TestParseBucketsErrors(t *testing.T) {
 
 func TestValidateWarmupConfig(t *testing.T) {
 	valid := WarmupConfig{
-		DSN:          "postgres://user:pass@localhost/db",
-		Connections:  10,
-		Parallelism:  2,
-		KeepAlive:    time.Second,
-		QueryTimeout: time.Second,
-		Logger:       testLogger{t},
+		DSN:            "postgres://user:pass@localhost/db",
+		Connections:    10,
+		Parallelism:    2,
+		MaxConnectRate: 50,
+		KeepAlive:      time.Second,
+		QueryTimeout:   time.Second,
+		Logger:         testLogger{t},
 	}
 	if err := validateWarmupConfig(valid); err != nil {
 		t.Fatalf("expected valid config, got %v", err)

@@ -25,6 +25,7 @@ type WarmupConfig struct {
 	DSN            string
 	Connections    int
 	Parallelism    int
+	MaxConnectRate float64
 	KeepAlive      time.Duration
 	QueryTimeout   time.Duration
 	Logger         Logger
@@ -99,9 +100,14 @@ func RunWarmup(ctx context.Context, cfg WarmupConfig) error {
 		heldMu    sync.Mutex
 	)
 
+	connectLimiter := rate.NewLimiter(rate.Limit(cfg.MaxConnectRate), cfg.Parallelism)
+
 	for i := 0; i < cfg.Connections; i++ {
 		index := i
 		group.Go(func() error {
+			if err := connectLimiter.Wait(groupCtx); err != nil {
+				return fmt.Errorf("connect limiter: %w", err)
+			}
 			acquireCtx, cancel := context.WithTimeout(groupCtx, cfg.QueryTimeout)
 			defer cancel()
 
@@ -499,6 +505,9 @@ func validateWarmupConfig(cfg WarmupConfig) error {
 	}
 	if cfg.QueryTimeout <= 0 {
 		return fmt.Errorf("%w: query timeout must be positive", ErrInvalidConfig)
+	}
+	if cfg.MaxConnectRate <= 0 {
+		return fmt.Errorf("%w: connect rate must be positive", ErrInvalidConfig)
 	}
 	if cfg.Logger == nil {
 		return fmt.Errorf("%w: logger is required", ErrInvalidConfig)
