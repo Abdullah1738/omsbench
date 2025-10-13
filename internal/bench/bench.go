@@ -234,7 +234,6 @@ func RunBenchmark(ctx context.Context, cfg RunConfig) error {
 	var (
 		successCount atomic.Uint64
 		failureCount atomic.Uint64
-		orderSeq     atomic.Uint64
 	)
 
 	limiter := rate.NewLimiter(rate.Limit(cfg.TargetTPS), cfg.Workers)
@@ -262,7 +261,7 @@ func RunBenchmark(ctx context.Context, cfg RunConfig) error {
 				default:
 				}
 
-				orderID := orderSeq.Add(1)
+				orderID := uint64(rng.Int63())
 				txCtx, cancel := context.WithTimeout(runCtx, cfg.QueryTimeout)
 				start := time.Now()
 				err := executeOrderTx(txCtx, pool, orderID, rng)
