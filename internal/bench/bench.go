@@ -100,7 +100,7 @@ func RunWarmup(ctx context.Context, cfg WarmupConfig) error {
 		heldMu    sync.Mutex
 	)
 
-	connectLimiter := rate.NewLimiter(rate.Limit(cfg.MaxConnectRate), cfg.Parallelism)
+	connectLimiter := rate.NewLimiter(rate.Limit(cfg.MaxConnectRate), 1)
 
 	for i := 0; i < cfg.Connections; i++ {
 		index := i
