@@ -305,12 +305,7 @@ EOF
 
 Generate a production-tuned cluster manifest. The repo already includes `fdb-cluster.yaml`, which scales storage, logs, proxies, and resolvers to sustain >100k TPS while keeping pods evenly spread across three AZs.
 
-```bash
-# manifest is committed in the repo
-envsubst < fdb-cluster.yaml | kubectl apply -f -
-```
-
-Key production levers:
+Key production levers (baked into `fdb-cluster.yaml`):
 
 - `storageServersPerPod` / `logServersPerPod` multiply storage and log processes per pod, yielding the 18 storage and 12 log processes required for sustained I/O without creating dozens of extra pods.
 - High `RoleCounts` for proxies, commit proxies, resolvers, and log routers keep the transaction pipeline wide enough for six-figure TPS; FoundationDB’s architecture scales write throughput by recruiting additional processes for those roles.

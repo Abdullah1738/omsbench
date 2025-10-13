@@ -27,7 +27,7 @@ spec:
             priority: 1
           - id: az-c
             priority: 1
-    RoleCounts:
+    roleCounts:
       storage: 18
       logs: 12
       proxies: 12
@@ -49,7 +49,6 @@ spec:
     proxy: 12
     commit_proxy: 12
     grv_proxy: 6
-    resolver: 6
     stateless: 12
     data_distributor: 1
     ratekeeper: 1
