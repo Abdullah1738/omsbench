@@ -382,7 +382,8 @@ func executeOrderTx(ctx context.Context, pool *pgxpool.Pool, orderID uint64, rng
 	}
 	defer conn.Release()
 
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	// Aurora DSQL currently rejects SERIALIZABLE; READ COMMITTED is the highest supported level.
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
