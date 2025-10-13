@@ -1,0 +1,119 @@
+apiVersion: apps.foundationdb.org/v1beta2
+kind: FoundationDBCluster
+metadata:
+  name: fdb-oms
+  namespace: ${FDB_CLUSTER_NS}
+spec:
+  version: ${FDB_VERSION}
+  imageType: split
+  automationOptions:
+    replacements:
+      enabled: true
+      maxConcurrentReplacements: 6
+      failureDetectionTimeSeconds: 600
+  faultDomain:
+    key: foundationdb.org/zone
+  storageServersPerPod: 2
+  logServersPerPod: 2
+  databaseConfiguration:
+    redundancy_mode: triple
+    storage_engine: ssd-2
+    usable_regions: 1
+    regions:
+      - datacenters:
+          - id: az-a
+            priority: 1
+          - id: az-b
+            priority: 1
+          - id: az-c
+            priority: 1
+    RoleCounts:
+      storage: 18
+      logs: 12
+      proxies: 12
+      commit_proxies: 12
+      grv_proxies: 6
+      resolvers: 6
+      log_routers: 12
+  labels:
+    matchLabels:
+      foundationdb.org/fdb-cluster-name: fdb-oms
+    processClassLabels:
+      - foundationdb.org/fdb-process-class
+    processGroupIDLabels:
+      - foundationdb.org/fdb-process-group-id
+  processCounts:
+    cluster_controller: 1
+    storage: 9
+    log: 6
+    proxy: 12
+    commit_proxy: 12
+    grv_proxy: 6
+    resolver: 6
+    stateless: 12
+    data_distributor: 1
+    ratekeeper: 1
+  processes:
+    general:
+      podTemplate:
+        spec:
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: topology.kubernetes.io/zone
+              whenUnsatisfiable: DoNotSchedule
+              labelSelector:
+                matchLabels:
+                  foundationdb.org/fdb-cluster-name: fdb-oms
+          containers:
+            - name: foundationdb
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 12Gi
+                limits:
+                  cpu: "6"
+                  memory: 16Gi
+            - name: foundationdb-kubernetes-sidecar
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 2Gi
+                limits:
+                  cpu: "2"
+                  memory: 4Gi
+          initContainers:
+            - name: foundationdb-kubernetes-init
+              resources:
+                requests:
+                  cpu: 1
+                  memory: 512Mi
+    storage:
+      volumeClaimTemplate:
+        metadata:
+          name: data
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: gp3
+          resources:
+            requests:
+              storage: 200Gi
+    log:
+      volumeClaimTemplate:
+        metadata:
+          name: log-data
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: gp3
+          resources:
+            requests:
+              storage: 200Gi
+  routing:
+    headlessService: true
+    publicIPSource: service
+    defineDNSLocalityFields: true
+  sidecarContainer:
+    enableLivenessProbe: true
+    enableReadinessProbe: true
+  useExplicitListenAddress: true

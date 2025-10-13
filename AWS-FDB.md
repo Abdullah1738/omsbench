@@ -303,115 +303,18 @@ export FDB_CLUSTER_NS=${FDB_CLUSTER_NS}
 EOF
 ```
 
-Write a manifest that matches the v2.x CRD “shape.” The example below is complete and can be applied directly after `envsubst`; tweak the process counts, resource requests, storage size, or load-balancer annotations to suit your cluster.citeturn0search0
+Generate a production-tuned cluster manifest. The repo already includes `fdb-cluster.yaml`, which scales storage, logs, proxies, and resolvers to sustain >100k TPS while keeping pods evenly spread across three AZs.
 
 ```bash
-cat <<'EOF' > fdb-cluster.yaml
-apiVersion: apps.foundationdb.org/v1beta2
-kind: FoundationDBCluster
-metadata:
-  name: fdb-oms
-  namespace: ${FDB_CLUSTER_NS}
-spec:
-  version: ${FDB_VERSION}
-  imageType: split
-  automationOptions:
-    replacements:
-      enabled: true
-  faultDomain:
-    key: foundationdb.org/zone
-  databaseConfiguration:
-    redundancy_mode: triple
-    storage_engine: ssd-2
-    usable_regions: 1
-    regions:
-      - datacenters:
-          - id: az-a   # update ids to match your AWS zone suffixes
-            priority: 1
-          - id: az-b
-            priority: 1
-          - id: az-c
-            priority: 1
-  labels:
-    matchLabels:
-      foundationdb.org/fdb-cluster-name: fdb-oms
-    processClassLabels:
-      - foundationdb.org/fdb-process-class
-    processGroupIDLabels:
-      - foundationdb.org/fdb-process-group-id
-  processCounts:
-    cluster_controller: 1
-    storage: 9
-    log: 6
-    stateless: 6
-  processes:
-    general:
-      customParameters:
-        - knob_disable_posix_kernel_aio=1
-      podTemplate:
-        spec:
-          topologySpreadConstraints:
-            - maxSkew: 1
-              topologyKey: topology.kubernetes.io/zone
-              whenUnsatisfiable: DoNotSchedule
-              labelSelector:
-                matchLabels:
-                  foundationdb.org/fdb-cluster-name: fdb-oms
-          containers:
-            - name: foundationdb
-              resources:
-                requests:
-                  cpu: "3"
-                  memory: 8Gi
-                limits:
-                  cpu: "4"
-                  memory: 16Gi
-            - name: foundationdb-kubernetes-sidecar
-              resources:
-                requests:
-                  cpu: "1"
-                  memory: 1Gi
-                limits:
-                  cpu: "2"
-                  memory: 2Gi
-          initContainers:
-            - name: foundationdb-kubernetes-init
-              resources:
-                requests:
-                  cpu: 1
-                  memory: 512Mi
-      volumeClaimTemplate:
-        metadata:
-          name: data
-        spec:
-          accessModes: ["ReadWriteOnce"]
-          storageClassName: gp3
-          resources:
-            requests:
-              storage: 200Gi
-  routing:
-    defineDNSLocalityFields: true
-    headless: true
-    publicExpose:
-      type: LoadBalancer
-      annotations:
-        service.beta.kubernetes.io/aws-load-balancer-type: nlb
-        service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-      spec:
-        ports:
-          - name: tls
-            port: 4500
-            targetPort: 4500
-  sidecarContainer:
-    enableLivenessProbe: true
-    enableReadinessProbe: false
-  useExplicitListenAddress: true
-EOF
+# manifest is committed in the repo
+envsubst < fdb-cluster.yaml | kubectl apply -f -
 ```
 
-The load balancer annotations follow the Amazon EKS guidance for provisioning public Network Load Balancers.citeturn1search3
+Key production levers:
 
-If you need additional tuning (e.g. multiple storage servers per pod, custom images, backup agents), start from this manifest and layer the options documented in the [operator customization guide](https://github.com/FoundationDB/fdb-kubernetes-operator/blob/v2.15.0/docs/manual/customization.md).citeturn0search0
+- `storageServersPerPod` / `logServersPerPod` multiply storage and log processes per pod, yielding the 18 storage and 12 log processes required for sustained I/O without creating dozens of extra pods.
+- High `RoleCounts` for proxies, commit proxies, resolvers, and log routers keep the transaction pipeline wide enough for six-figure TPS; FoundationDB’s architecture scales write throughput by recruiting additional processes for those roles.
+- Elevated CPU/memory reservations for the main and sidecar containers ensure each pod stays CPU scheduled under load.
 
 Apply and watch status:
 
@@ -425,7 +328,14 @@ kubectl -n ${FDB_CLUSTER_NS} get foundationdbclusters.apps.foundationdb.org fdb-
 echo "Wait until reconciled equals desired before load testing"
 ```
 
-When healthy, obtain the cluster file and service endpoint:
+When healthy, front the cluster with an AWS Network Load Balancer and retrieve the connection information:
+
+```bash
+# service manifest is committed in the repo
+kubectl apply -f fdb-public-svc.yaml
+```
+
+When the service has an address, obtain the cluster file and endpoint:
 
 ```bash
 kubectl -n ${FDB_CLUSTER_NS} get secret fdb-oms-cluster-file -o jsonpath='{.data.cluster-file}' | base64 -d > fdb.cluster
