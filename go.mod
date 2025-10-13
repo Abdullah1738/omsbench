@@ -1,4 +1,4 @@
-module github.com/example/omsbench
+module github.com/Abdullah1738/omsbench
 
 go 1.25.1
 

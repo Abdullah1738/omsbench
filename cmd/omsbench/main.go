@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/example/omsbench/internal/bench"
+	"github.com/Abdullah1738/omsbench/internal/bench"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
