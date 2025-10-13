@@ -274,7 +274,7 @@ kubectl config set-context --current --namespace=foundationdb-system >/dev/null 
 The operator maintainers recommend installing the CRDs and controller from a tagged release rather than `main`. Adjust `FDB_OPERATOR_VERSION` if a newer release appears on the project’s GitHub releases page.citeturn0search0
 
 ```bash
-kubectl create namespace foundationdb-system
+kubectl get namespace foundationdb-system >/dev/null 2>&1 || kubectl create namespace foundationdb-system
 
 kubectl apply -f https://raw.githubusercontent.com/FoundationDB/fdb-kubernetes-operator/${FDB_OPERATOR_VERSION}/config/crd/bases/apps.foundationdb.org_foundationdbclusters.yaml
 kubectl apply -f https://raw.githubusercontent.com/FoundationDB/fdb-kubernetes-operator/${FDB_OPERATOR_VERSION}/config/crd/bases/apps.foundationdb.org_foundationdbbackups.yaml
@@ -303,7 +303,7 @@ export FDB_CLUSTER_NS=${FDB_CLUSTER_NS}
 EOF
 ```
 
-Create the cluster manifest:
+Write a manifest that matches the v2.x CRD “shape.” The example below is complete and can be applied directly after `envsubst`; tweak the process counts, resource requests, storage size, or load-balancer annotations to suit your cluster.citeturn0search0
 
 ```bash
 cat <<'EOF' > fdb-cluster.yaml
@@ -311,72 +311,126 @@ apiVersion: apps.foundationdb.org/v1beta2
 kind: FoundationDBCluster
 metadata:
   name: fdb-oms
+  namespace: ${FDB_CLUSTER_NS}
 spec:
   version: ${FDB_VERSION}
+  imageType: split
+  automationOptions:
+    replacements:
+      enabled: true
+  faultDomain:
+    key: foundationdb.org/zone
   databaseConfiguration:
     redundancy_mode: triple
     storage_engine: ssd-2
     usable_regions: 1
     regions:
-    - datacenters:
-      - id: az-a
-        priority: 1
-      - id: az-b
-        priority: 1
-      - id: az-c
-        priority: 1
-  faultDomain:
-    key: foundationdb.org/zone
+      - datacenters:
+          - id: az-a   # update ids to match your AWS zone suffixes
+            priority: 1
+          - id: az-b
+            priority: 1
+          - id: az-c
+            priority: 1
+  labels:
+    matchLabels:
+      foundationdb.org/fdb-cluster-name: fdb-oms
+    processClassLabels:
+      - foundationdb.org/fdb-process-class
+    processGroupIDLabels:
+      - foundationdb.org/fdb-process-group-id
   processCounts:
+    cluster_controller: 1
     storage: 9
     log: 6
     stateless: 6
   processes:
     general:
+      customParameters:
+        - knob_disable_posix_kernel_aio=1
       podTemplate:
         spec:
           topologySpreadConstraints:
-          - maxSkew: 1
-            topologyKey: topology.kubernetes.io/zone
-            whenUnsatisfiable: DoNotSchedule
-            labelSelector:
-              matchLabels:
-                foundationdb.org/fdb-cluster-name: fdb-oms
+            - maxSkew: 1
+              topologyKey: topology.kubernetes.io/zone
+              whenUnsatisfiable: DoNotSchedule
+              labelSelector:
+                matchLabels:
+                  foundationdb.org/fdb-cluster-name: fdb-oms
           containers:
-          - name: foundationdb
-            resources:
-              requests:
-                cpu: "3"
-                memory: 8Gi
-              limits:
-                cpu: "4"
-                memory: 16Gi
-  storage:
-    volumeSize: 200G
-    storageClass: gp3
-  services:
-  - name: public
-    type: LoadBalancer
-    publicIPSource: Service
-  automationOptions:
-    replacementsImmediately: 1
+            - name: foundationdb
+              resources:
+                requests:
+                  cpu: "3"
+                  memory: 8Gi
+                limits:
+                  cpu: "4"
+                  memory: 16Gi
+            - name: foundationdb-kubernetes-sidecar
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 1Gi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi
+          initContainers:
+            - name: foundationdb-kubernetes-init
+              resources:
+                requests:
+                  cpu: 1
+                  memory: 512Mi
+      volumeClaimTemplate:
+        metadata:
+          name: data
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          storageClassName: gp3
+          resources:
+            requests:
+              storage: 200Gi
+  routing:
+    defineDNSLocalityFields: true
+    headless: true
+    publicExpose:
+      type: LoadBalancer
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-type: nlb
+        service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+      spec:
+        ports:
+          - name: tls
+            port: 4500
+            targetPort: 4500
+  sidecarContainer:
+    enableLivenessProbe: true
+    enableReadinessProbe: false
+  useExplicitListenAddress: true
 EOF
 ```
+
+The load balancer annotations follow the Amazon EKS guidance for provisioning public Network Load Balancers.citeturn1search3
+
+If you need additional tuning (e.g. multiple storage servers per pod, custom images, backup agents), start from this manifest and layer the options documented in the [operator customization guide](https://github.com/FoundationDB/fdb-kubernetes-operator/blob/v2.15.0/docs/manual/customization.md).citeturn0search0
 
 Apply and watch status:
 
 ```bash
 envsubst < fdb-cluster.yaml | kubectl apply -f -
-kubectl get foundationdbclusters.apps.foundationdb.org fdb-oms -o json | jq '.status.health'
-kubectl get pods -l foundationdb.org/fdb-cluster-name=fdb-oms -o wide
+kubectl -n ${FDB_CLUSTER_NS} get foundationdbclusters.apps.foundationdb.org fdb-oms -o json | jq '.status.health'
+kubectl -n ${FDB_CLUSTER_NS} get pods -l foundationdb.org/fdb-cluster-name=fdb-oms -o wide
+
+kubectl -n ${FDB_CLUSTER_NS} get foundationdbclusters.apps.foundationdb.org fdb-oms \
+  -o jsonpath='{.status.generations}'
+echo "Wait until reconciled equals desired before load testing"
 ```
 
 When healthy, obtain the cluster file and service endpoint:
 
 ```bash
-kubectl get secret fdb-oms-cluster-file -o jsonpath='{.data.cluster-file}' | base64 -d > fdb.cluster
+kubectl -n ${FDB_CLUSTER_NS} get secret fdb-oms-cluster-file -o jsonpath='{.data.cluster-file}' | base64 -d > fdb.cluster
 
-FDB_LB=$(kubectl get svc fdb-oms-public -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+FDB_LB=$(kubectl -n ${FDB_CLUSTER_NS} get svc fdb-oms-public -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
 echo "FoundationDB public service: $FDB_LB"
 ```
 
