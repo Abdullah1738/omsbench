@@ -2,3 +2,5 @@ user-data.sh
 README.md
 /.gocache
 env.fdb
+/scripts
+/state
