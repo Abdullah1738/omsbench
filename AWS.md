@@ -1617,7 +1617,7 @@ Checkpoint artifacts: `state/fdb.cluster`, `state/cluster.json`, `s3://$STATE_BU
 
 ## Step 08 – Configure FoundationDB Cluster
 
-Sets coordinators, applies Redwood triple replication, tunes proxies/resolvers/logs, and captures status output. Uses `fdbcli configure` which is the supported pathway for topology and redundancy configuration.citeturn4search0
+Sets coordinators, applies Redwood triple replication, tunes proxies/resolvers/logs, and captures status output over SSH. Uses `fdbcli configure` which is the supported pathway for topology and redundancy configuration.citeturn4search0
 
 ```bash
 cat <<'EOF' > scripts/08-configure-cluster.sh
@@ -1628,18 +1628,75 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR="$SCRIPT_DIR/../state"
 source "$STATE_DIR/env.sh"
 
-INSTANCES_JSON=$(cat "$STATE_DIR/instances.json")
-STAT_NODE_ID=$(echo "$INSTANCES_JSON" | jq -r '.stateless[0].instance_id')
-STORAGE_IPS=$(echo "$INSTANCES_JSON" | jq -r '.storage[].private_ip')
+usage() {
+  cat <<'USAGE'
+Usage: 08-configure-cluster.sh [SSH_KEY_PATH]
 
-if [ -z "$STAT_NODE_ID" ]; then
+Provide the private key path or set SSH_KEY_PATH in the environment.
+USAGE
+}
+
+if [[ $# -gt 1 ]]; then
+  usage >&2
+  exit 1
+fi
+
+if [[ $# -eq 1 ]]; then
+  SSH_KEY_PATH="$1"
+fi
+
+if [[ -z "${SSH_KEY_PATH:-}" ]]; then
+  usage >&2
+  exit 1
+fi
+
+if [[ ! -f "$SSH_KEY_PATH" ]]; then
+  echo "SSH key $SSH_KEY_PATH not found." >&2
+  exit 1
+fi
+
+SSH_USER=${SSH_USER:-ec2-user}
+SSH_BASE_OPTS=(
+  -i "$SSH_KEY_PATH"
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=10
+)
+SSH_OPTS=("${SSH_BASE_OPTS[@]}" -o BatchMode=yes)
+SCP_OPTS=("${SSH_BASE_OPTS[@]}" -o BatchMode=yes)
+
+wait_for_ssh() {
+  local ip=$1
+  local attempt=1
+  while [ $attempt -le 36 ]; do
+    if ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" 'exit 0' >/dev/null 2>&1; then
+      return
+    fi
+    sleep 5
+    attempt=$((attempt + 1))
+  done
+  echo "Unable to reach $ip via SSH" >&2
+  exit 1
+}
+
+INSTANCES_JSON=$(cat "$STATE_DIR/instances.json")
+STAT_NODE_IP=$(echo "$INSTANCES_JSON" | jq -r '.stateless[0]?.public_ip // empty')
+if [[ -z "$STAT_NODE_IP" ]]; then
   echo "No stateless node available for fdbcli" >&2
   exit 1
 fi
 
-COORDINATORS=$(echo "$STORAGE_IPS" | awk '{printf "%s:4500 ", $1}' | xargs | sed 's/ /,/g')
+STORAGE_IPS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.public_ip'))
+if [ ${#STORAGE_IPS[@]} -eq 0 ]; then
+  echo "No storage nodes found in instances.json" >&2
+  exit 1
+fi
 
-cat >"$STATE_DIR/configure-cluster.sh" <<SCRIPT
+COORDINATORS=$(printf "%s:4500," "${STORAGE_IPS[@]}")
+COORDINATORS=${COORDINATORS%,}
+
+REMOTE_SCRIPT="$STATE_DIR/configure-cluster.remote.sh"
+cat >"$REMOTE_SCRIPT" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -1648,45 +1705,26 @@ sudo fdbcli --exec "configure new triple ssd-redwood-1 logs=8 commit_proxies=4 g
 sudo fdbcli --exec "status details" | tee /tmp/fdb-status.txt
 SCRIPT
 
-SCRIPT_KEY="scripts/configure-cluster-${ENV_ID}.sh"
-aws s3 cp "$STATE_DIR/configure-cluster.sh" "s3://${STATE_BUCKET}/${SCRIPT_KEY}" --region "$REGION"
+TARGET=/tmp/configure-cluster.sh
+wait_for_ssh "$STAT_NODE_IP"
+scp "${SCP_OPTS[@]}" "$REMOTE_SCRIPT" "$SSH_USER@$STAT_NODE_IP:$TARGET"
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$STAT_NODE_IP" "chmod +x $TARGET && sudo bash $TARGET"
+scp "${SCP_OPTS[@]}" "$SSH_USER@$STAT_NODE_IP:/tmp/fdb-status.txt" "$STATE_DIR/fdb-status-initial.txt"
 
-cat >"$STATE_DIR/configure-commands.json" <<JSON
-{
-  "commands": [
-    "aws s3 cp s3://${STATE_BUCKET}/${SCRIPT_KEY} /tmp/configure-cluster.sh --region ${REGION}",
-    "sudo bash /tmp/configure-cluster.sh"
-  ]
-}
-JSON
-
-CMD_OUTPUT=$(aws ssm send-command \
-  --document-name "AWS-RunShellScript" \
-  --parameters file://"$STATE_DIR/configure-commands.json" \
-  --instance-ids "$STAT_NODE_ID" \
-  --comment "${CLUSTER_NAME} configure" \
-  --region "$REGION")
-
-CMD_ID=$(echo "$CMD_OUTPUT" | jq -r '.Command.CommandId')
-aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "$STAT_NODE_ID" --region "$REGION"
-
-aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$STAT_NODE_ID" --region "$REGION" \
-  | jq -r '.StandardOutputContent' > "$STATE_DIR/fdb-status-initial.txt"
-
-aws s3 cp "$STATE_DIR/fdb-status-initial.txt" "s3://${STATE_BUCKET}/state/fdb-status-initial.txt"
+rm -f "$REMOTE_SCRIPT"
+aws s3 cp "$STATE_DIR/fdb-status-initial.txt" "s3://${STATE_BUCKET}/state/fdb-status-initial.txt" --region "$REGION"
 
 printf 'Cluster configured. Status snapshot in %s/fdb-status-initial.txt\n' "$STATE_DIR"
 EOF
 ```
 
-Run: `bash scripts/08-configure-cluster.sh`  
+Run: `bash scripts/08-configure-cluster.sh ~/.ssh/abdullah.pem` (set `SSH_KEY_PATH` to avoid passing the argument).  
 Checkpoint artifacts: `state/fdb-status-initial.txt`, `s3://$STATE_BUCKET/state/fdb-status-initial.txt`.
 
 ---
-
 ## Step 09 – Enable Backups and Metric Exports
 
-Starts continuous backups to the dedicated S3 bucket, sets lifecycle retention, and configures Prometheus scrape via a lightweight exporter.
+Starts continuous backups to the dedicated S3 bucket, sets lifecycle retention, and configures Prometheus scrape via a lightweight exporter over SSH.
 
 ```bash
 cat <<'EOF' > scripts/09-backup-and-metrics.sh
@@ -1697,9 +1735,79 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR="$SCRIPT_DIR/../state"
 source "$STATE_DIR/env.sh"
 
+usage() {
+  cat <<'USAGE'
+Usage: 09-backup-and-metrics.sh [SSH_KEY_PATH]
+
+Provide the private key path or set SSH_KEY_PATH in the environment.
+USAGE
+}
+
+if [[ $# -gt 1 ]]; then
+  usage >&2
+  exit 1
+fi
+
+if [[ $# -eq 1 ]]; then
+  SSH_KEY_PATH="$1"
+fi
+
+if [[ -z "${SSH_KEY_PATH:-}" ]]; then
+  usage >&2
+  exit 1
+fi
+
+if [[ ! -f "$SSH_KEY_PATH" ]]; then
+  echo "SSH key $SSH_KEY_PATH not found." >&2
+  exit 1
+fi
+
+SSH_USER=${SSH_USER:-ec2-user}
+SSH_BASE_OPTS=(
+  -i "$SSH_KEY_PATH"
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=10
+)
+SSH_OPTS=("${SSH_BASE_OPTS[@]}" -o BatchMode=yes)
+SCP_OPTS=("${SSH_BASE_OPTS[@]}" -o BatchMode=yes)
+
+wait_for_ssh() {
+  local ip=$1
+  local attempt=1
+  while [ $attempt -le 36 ]; do
+    if ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" 'exit 0' >/dev/null 2>&1; then
+      return
+    fi
+    sleep 5
+    attempt=$((attempt + 1))
+  done
+  echo "Unable to reach $ip via SSH" >&2
+  exit 1
+}
+
+run_remote() {
+  local ip=$1
+  local local_script=$2
+  local remote_path=$3
+  wait_for_ssh "$ip"
+  scp "${SCP_OPTS[@]}" "$local_script" "$SSH_USER@$ip:$remote_path"
+  ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" "chmod +x $remote_path && sudo bash $remote_path"
+}
+
 INSTANCES_JSON=$(cat "$STATE_DIR/instances.json")
-STATELESS_IDS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.instance_id'))
-STORAGE_IDS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.instance_id'))
+STATELESS_IPS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.public_ip'))
+STORAGE_IPS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.public_ip'))
+
+if [ ${#STATELESS_IPS[@]} -eq 0 ]; then
+  echo "No stateless nodes found in instances.json" >&2
+  exit 1
+fi
+
+if [ ${#STORAGE_IPS[@]} -eq 0 ]; then
+  echo "No storage nodes found in instances.json" >&2
+  exit 1
+fi
 
 aws s3api put-bucket-lifecycle-configuration \
   --bucket "$BACKUP_BUCKET" \
@@ -1723,30 +1831,6 @@ sudo fdbbackup start -d blobstore://{{BACKUP_BUCKET}}/fdb --log
 SCRIPT
 
 sed "s|{{BACKUP_BUCKET}}|$BACKUP_BUCKET|g" "$STATE_DIR/backup-template.sh" > "$STATE_DIR/backup.sh"
-
-BACKUP_KEY="scripts/ops-backup-${ENV_ID}.sh"
-aws s3 cp "$STATE_DIR/backup.sh" "s3://${STATE_BUCKET}/${BACKUP_KEY}" --region "$REGION"
-
-cat >"$STATE_DIR/backup-commands.json" <<JSON
-{
-  "commands": [
-    "aws s3 cp s3://${STATE_BUCKET}/${BACKUP_KEY} /tmp/backup.sh --region ${REGION}",
-    "sudo bash /tmp/backup.sh"
-  ]
-}
-JSON
-
-CMD_OUTPUT=$(aws ssm send-command \
-  --document-name "AWS-RunShellScript" \
-  --parameters file://"$STATE_DIR/backup-commands.json" \
-  --targets "Key=tag:Tier,Values=stateless" \
-  --comment "${CLUSTER_NAME} backup start" \
-  --region "$REGION")
-
-CMD_ID=$(echo "$CMD_OUTPUT" | jq -r '.Command.CommandId')
-for id in "${STATELESS_IDS[@]}"; do
-  aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "$id" --region "$REGION"
-done
 
 cat >"$STATE_DIR/exporter-template.sh" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1788,42 +1872,28 @@ SCRIPT
 
 sed "s|{{GO_VERSION}}|$GO_VERSION|g" "$STATE_DIR/exporter-template.sh" > "$STATE_DIR/exporter.sh"
 
-EXPORTER_KEY="scripts/ops-exporter-${ENV_ID}.sh"
-aws s3 cp "$STATE_DIR/exporter.sh" "s3://${STATE_BUCKET}/${EXPORTER_KEY}" --region "$REGION"
-
-cat >"$STATE_DIR/exporter-commands.json" <<JSON
-{
-  "commands": [
-    "aws s3 cp s3://${STATE_BUCKET}/${EXPORTER_KEY} /tmp/exporter.sh --region ${REGION}",
-    "sudo bash /tmp/exporter.sh"
-  ]
-}
-JSON
-
-EXP_CMD=$(aws ssm send-command \
-  --document-name "AWS-RunShellScript" \
-  --parameters file://"$STATE_DIR/exporter-commands.json" \
-  --targets "Key=tag:Tier,Values=storage" \
-  --comment "${CLUSTER_NAME} exporter" \
-  --region "$REGION")
-
-EXP_ID=$(echo "$EXP_CMD" | jq -r '.Command.CommandId')
-for id in "${STORAGE_IDS[@]}"; do
-  aws ssm wait command-executed --command-id "$EXP_ID" --instance-id "$id" --region "$REGION"
+BACKUP_REMOTE=/tmp/backup.sh
+for ip in "${STATELESS_IPS[@]}"; do
+  run_remote "$ip" "$STATE_DIR/backup.sh" "$BACKUP_REMOTE"
 done
 
+EXPORTER_REMOTE=/tmp/exporter.sh
+for ip in "${STORAGE_IPS[@]}"; do
+  run_remote "$ip" "$STATE_DIR/exporter.sh" "$EXPORTER_REMOTE"
+done
+
+rm -f "$STATE_DIR/backup-template.sh" "$STATE_DIR/exporter-template.sh"
 printf 'Continuous backup started and Prometheus exporter enabled on storage nodes (port 2112).\n'
 EOF
 ```
 
-Run: `bash scripts/09-backup-and-metrics.sh`  
-Checkpoint artifacts: backup lifecycle applied, exporter service running (verify via `aws ssm send-command` as needed).
+Run: `bash scripts/09-backup-and-metrics.sh ~/.ssh/abdullah.pem` (set `SSH_KEY_PATH` to avoid passing the argument).  
+Checkpoint artifacts: backup lifecycle applied, exporter service running (verify via `ssh` to the respective nodes).
 
 ---
-
 ## Step 10 – Run Benchmark (`internal/bench/bench.go`)
 
-Executes the benchmark from the bench host, logs Prometheus metrics, and persists output to S3 for traceability.
+Executes the benchmark from the bench host over SSH, logs Prometheus metrics, and persists output to S3 for traceability.
 
 ```bash
 cat <<'EOF' > scripts/10-run-benchmark.sh
@@ -1834,11 +1904,66 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR="$SCRIPT_DIR/../state"
 source "$STATE_DIR/env.sh"
 
+usage() {
+  cat <<'USAGE'
+Usage: 10-run-benchmark.sh [SSH_KEY_PATH]
+
+Provide the private key path or set SSH_KEY_PATH in the environment.
+USAGE
+}
+
+if [[ $# -gt 1 ]]; then
+  usage >&2
+  exit 1
+fi
+
+if [[ $# -eq 1 ]]; then
+  SSH_KEY_PATH="$1"
+fi
+
+if [[ -z "${SSH_KEY_PATH:-}" ]]; then
+  usage >&2
+  exit 1
+fi
+
+if [[ ! -f "$SSH_KEY_PATH" ]]; then
+  echo "SSH key $SSH_KEY_PATH not found." >&2
+  exit 1
+fi
+
+SSH_USER=${SSH_USER:-ec2-user}
+SSH_BASE_OPTS=(
+  -i "$SSH_KEY_PATH"
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=10
+)
+SSH_OPTS=("${SSH_BASE_OPTS[@]}" -o BatchMode=yes)
+SCP_OPTS=("${SSH_BASE_OPTS[@]}" -o BatchMode=yes)
+
+wait_for_ssh() {
+  local ip=$1
+  local attempt=1
+  while [ $attempt -le 36 ]; do
+    if ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" 'exit 0' >/dev/null 2>&1; then
+      return
+    fi
+    sleep 5
+    attempt=$((attempt + 1))
+  done
+  echo "Unable to reach $ip via SSH" >&2
+  exit 1
+}
+
 INSTANCES_JSON=$(cat "$STATE_DIR/instances.json")
-BENCH_ID=$(echo "$INSTANCES_JSON" | jq -r '.bench[0].instance_id')
+BENCH_IP=$(echo "$INSTANCES_JSON" | jq -r '.bench[0]?.public_ip // empty')
+if [[ -z "$BENCH_IP" ]]; then
+  echo "No bench node found in instances.json" >&2
+  exit 1
+fi
 
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
-RUN_NAME="bench-${TIMESTAMP}"
+RUN_NAME="bench-$TIMESTAMP"
 
 cat >"$STATE_DIR/bench-template.sh" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1864,38 +1989,20 @@ sed -e "s|{{BENCH_NAMESPACE}}|$BENCH_NAMESPACE|g" \
     -e "s|{{BENCH_BUCKET}}|$BENCH_BUCKET|g" \
     "$STATE_DIR/bench-template.sh" > "$STATE_DIR/bench.sh"
 
-BENCH_KEY="scripts/bench-run-${RUN_NAME}.sh"
-aws s3 cp "$STATE_DIR/bench.sh" "s3://${STATE_BUCKET}/${BENCH_KEY}" --region "$REGION"
+TARGET=/tmp/bench.sh
+wait_for_ssh "$BENCH_IP"
+scp "${SCP_OPTS[@]}" "$STATE_DIR/bench.sh" "$SSH_USER@$BENCH_IP:$TARGET"
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$BENCH_IP" "chmod +x $TARGET && bash $TARGET"
 
-cat >"$STATE_DIR/bench-commands.json" <<JSON
-{
-  "commands": [
-    "aws s3 cp s3://${STATE_BUCKET}/${BENCH_KEY} /tmp/bench.sh --region ${REGION}",
-    "bash /tmp/bench.sh"
-  ]
-}
-JSON
-
-CMD_OUTPUT=$(aws ssm send-command \
-  --document-name "AWS-RunShellScript" \
-  --parameters file://"$STATE_DIR/bench-commands.json" \
-  --instance-ids "$BENCH_ID" \
-  --comment "${CLUSTER_NAME} benchmark ${RUN_NAME}" \
-  --region "$REGION")
-
-CMD_ID=$(echo "$CMD_OUTPUT" | jq -r '.Command.CommandId')
-echo "Benchmark command ${CMD_ID} running; waiting for completion (this takes ~15 minutes)..."
-aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "$BENCH_ID" --region "$REGION"
-
+rm -f "$STATE_DIR/bench-template.sh"
 printf 'Benchmark completed as %s; logs stored at s3://%s/runs/%s.log\n' "$RUN_NAME" "$BENCH_BUCKET" "$RUN_NAME"
 EOF
 ```
 
-Run: `bash scripts/10-run-benchmark.sh`  
+Run: `bash scripts/10-run-benchmark.sh ~/.ssh/abdullah.pem` (set `SSH_KEY_PATH` to avoid passing the argument).  
 Checkpoint artifacts: `s3://$BENCH_BUCKET/runs/bench-<timestamp>.log`.
 
 ---
-
 ## Resume & Disaster Recovery Notes
 
 1. To recreate environment variables, download the Parameter Store backup:
