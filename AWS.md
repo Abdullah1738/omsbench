@@ -1329,13 +1329,16 @@ if [ -z "$DATA_MOUNT" ]; then
   exit 1
 fi
 
-sudo mkdir -p "$DATA_MOUNT"/fdb-{4500,4501,4502,4503,4504,4505}
-sudo chown -R foundationdb:foundationdb "$DATA_MOUNT"
-
 tmpdir=$(mktemp -d)
 curl -fsSL "$SERVER_RPM_URL" -o "$tmpdir/server.rpm"
 curl -fsSL "$CLIENT_RPM_URL" -o "$tmpdir/clients.rpm"
 sudo rpm -Uvh --replacepkgs "$tmpdir/"*.rpm
+
+sudo mkdir -p "$DATA_MOUNT"/fdb-{4500,4501,4502,4503,4504,4505}
+if ! getent passwd foundationdb >/dev/null; then
+  sudo useradd -r -M foundationdb
+fi
+sudo chown -R foundationdb:foundationdb "$DATA_MOUNT"
 
 echo "$CLUSTER_FILE_B64" | base64 -d | sudo tee /etc/foundationdb/fdb.cluster >/dev/null
 sudo chown foundationdb:foundationdb /etc/foundationdb/fdb.cluster
