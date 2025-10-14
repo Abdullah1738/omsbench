@@ -803,25 +803,49 @@ cat <<'EOF' > scripts/05-kms-and-tls.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
+command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
+command -v aws >/dev/null || { echo "aws CLI is required" >&2; exit 1; }
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR="$SCRIPT_DIR/../state"
 source "$STATE_DIR/env.sh"
 
-KEY_ID=$(aws kms describe-key --key-id "$KMS_ALIAS" --region "$REGION" 2>/dev/null | jq -r '.KeyMetadata.KeyId // empty')
+log() {
+  printf '%s\n' "$*" >&2
+}
+
+fetch_existing_key() {
+  local output
+  if ! output=$(aws kms describe-key --key-id "$KMS_ALIAS" --region "$REGION" 2>&1); then
+    if grep -q 'NotFoundException' <<<"$output"; then
+      echo ""
+    else
+      log "ERROR: describe-key failed: $output"
+      exit 1
+    fi
+  else
+    echo "$output" | jq -r '.KeyMetadata.KeyId'
+  fi
+}
+
+KEY_ID=$(fetch_existing_key)
+
 if [ -z "$KEY_ID" ]; then
+  log "No existing KMS key for alias $KMS_ALIAS; creating one"
   KEY_ID=$(aws kms create-key \
     --description "FoundationDB KMS key ${CLUSTER_NAME}" \
     --tags TagKey=Cluster,TagValue="$CLUSTER_NAME" \
     --region "$REGION" \
     | jq -r '.KeyMetadata.KeyId')
   aws kms create-alias --alias-name "$KMS_ALIAS" --target-key-id "$KEY_ID" --region "$REGION"
-  echo "Created KMS key $KEY_ID"
+  log "Created KMS key $KEY_ID and alias $KMS_ALIAS"
 else
-  echo "Reusing KMS key $KEY_ID"
+  log "Reusing KMS key $KEY_ID for alias $KMS_ALIAS"
 fi
 
 apply_kms_encryption() {
   local bucket=$1
+  log "Applying KMS encryption to bucket $bucket"
   aws s3api put-bucket-encryption \
     --bucket "$bucket" \
     --server-side-encryption-configuration "{\"Rules\":[{\"ApplyServerSideEncryptionByDefault\":{\"SSEAlgorithm\":\"aws:kms\",\"KMSMasterKeyID\":\"$KEY_ID\"}}]}" \
@@ -848,7 +872,9 @@ aws ssm put-parameter \
   --overwrite \
   --region "$REGION"
 
-# TLS placeholders (replace with real PEM material before enabling clients)
+log "Stored KMS metadata at $STATE_DIR/kms.json and SSM ${SSM_PARAMETER_PREFIX}/infra/kms"
+
+log "Writing TLS placeholder parameters"
 aws ssm put-parameter \
   --name "${SSM_PARAMETER_PREFIX}/tls/ca.pem" \
   --type "SecureString" \
@@ -870,7 +896,9 @@ aws ssm put-parameter \
   --overwrite \
   --region "$REGION"
 
-printf 'KMS key %s registered. Replace TLS placeholder parameters under %s/tls/* before production cutover.\n' "$KEY_ID" "$SSM_PARAMETER_PREFIX"
+log "KMS key $KEY_ID registered. Replace TLS placeholders under ${SSM_PARAMETER_PREFIX}/tls/* before production use."
+
+EOF
 EOF
 ```
 
