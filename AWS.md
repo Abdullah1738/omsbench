@@ -848,9 +848,8 @@ apply_kms_encryption() {
   log "Applying KMS encryption to bucket $bucket"
   aws s3api put-bucket-encryption \
     --bucket "$bucket" \
-    --server-side-encryption-configuration "{\"Rules\":[{\"ApplyServerSideEncryptionByDefault\":{\"SSEAlgorithm\":\"aws:kms\",\"KMSMasterKeyID\":\"$KEY_ID\"}}]}" \
+    --server-side-encryption-configuration "{\"Rules\":[{\"ApplyServerSideEncryptionByDefault\":{\"SSEAlgorithm\":\"aws:kms\",\"KMSMasterKeyID\":\"$KEY_ID\"},\"BucketKeyEnabled\":true}]}" \
     --region "$REGION"
-  aws s3api put-bucket-key --bucket "$bucket" --server-side-encryption-configuration '{"BucketKeyEnabled":true}' --region "$REGION"
 }
 
 apply_kms_encryption "$STATE_BUCKET"
@@ -898,6 +897,7 @@ aws ssm put-parameter \
 
 log "KMS key $KEY_ID registered. Replace TLS placeholders under ${SSM_PARAMETER_PREFIX}/tls/* before production use."
 
+EOF
 EOF
 EOF
 ```
