@@ -1241,21 +1241,28 @@ SSH_OPTS=(
 
 INSTANCES_JSON=$(cat "$STATE_DIR/instances.json")
 
-STORAGE_IPS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.public_ip'))
+STORAGE_PUBLIC_IPS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.public_ip'))
+STORAGE_PRIVATE_IPS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.private_ip'))
 STORAGE_IDS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.instance_id'))
 STATELESS_IDS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.instance_id'))
 BENCH_ID=$(echo "$INSTANCES_JSON" | jq -r '.bench[0]?.instance_id')
 BENCH_IP=$(echo "$INSTANCES_JSON" | jq -r '.bench[0]?.public_ip // empty')
 
-if [ ${#STORAGE_IPS[@]} -ne 5 ]; then
-  echo "Expected 5 storage nodes; found ${#STORAGE_IPS[@]}" >&2
+if [ ${#STORAGE_PUBLIC_IPS[@]} -ne 5 ]; then
+  echo "Expected 5 storage nodes; found ${#STORAGE_PUBLIC_IPS[@]}" >&2
+  exit 1
+fi
+if [ ${#STORAGE_PRIVATE_IPS[@]} -ne 5 ]; then
+  echo "Expected 5 private storage addresses; found ${#STORAGE_PRIVATE_IPS[@]}" >&2
   exit 1
 fi
 
-CLUSTER_ID=${CLUSTER_ID:-$(uuidgen)}
-COORDINATORS=$(printf "%s:4500," "${STORAGE_IPS[@]}")
+CLUSTER_ID_RAW=${CLUSTER_ID:-$(uuidgen)}
+CLUSTER_ID=${CLUSTER_ID_RAW//-/}
+CLUSTER_NAME_CANONICAL=$(printf '%s' "$CLUSTER_NAME" | tr -c '[:alnum:]_' '_')
+COORDINATORS=$(printf "%s:4500," "${STORAGE_PRIVATE_IPS[@]}")
 COORDINATORS=${COORDINATORS%,}
-CLUSTER_LINE="${CLUSTER_NAME}:${CLUSTER_ID}@${COORDINATORS}"
+CLUSTER_LINE="${CLUSTER_NAME_CANONICAL}:${CLUSTER_ID}@${COORDINATORS}"
 
 echo "$CLUSTER_LINE" > "$STATE_DIR/fdb.cluster"
 aws s3 cp "$STATE_DIR/fdb.cluster" "s3://${STATE_BUCKET}/state/fdb.cluster"
@@ -1266,7 +1273,7 @@ aws ssm put-parameter \
   --overwrite \
   --region "$REGION"
 
-COORD_JSON=$(printf '"%s:4500",' "${STORAGE_IPS[@]}")
+COORD_JSON=$(printf '"%s:4500",' "${STORAGE_PRIVATE_IPS[@]}")
 COORD_JSON="[${COORD_JSON%,}]"
 
 cat >"$STATE_DIR/cluster.json" <<JSON
@@ -1408,12 +1415,16 @@ curl -fsSL "$SERVER_RPM_URL" -o "$tmpdir/server.rpm"
 curl -fsSL "$CLIENT_RPM_URL" -o "$tmpdir/clients.rpm"
 sudo rpm -Uvh --replacepkgs "$tmpdir/"*.rpm
 
+sudo rm -rf "$DATA_MOUNT"/fdb-{4500,4501,4502,4503,4504,4505}
 sudo mkdir -p "$DATA_MOUNT"/fdb-{4500,4501,4502,4503,4504,4505}
 if ! getent passwd foundationdb >/dev/null; then
   sudo useradd -r -M foundationdb
 fi
 sudo chown -R foundationdb:foundationdb "$DATA_MOUNT"
-
+sudo mkdir -p /var/log/foundationdb
+sudo chown foundationdb:foundationdb /var/log/foundationdb
+sudo chmod 750 /var/log/foundationdb
+sudo find /var/log/foundationdb -maxdepth 1 -type f -name 'trace.*' -delete
 echo "$CLUSTER_FILE_B64" | base64 -d | sudo tee /etc/foundationdb/fdb.cluster >/dev/null
 sudo chown foundationdb:foundationdb /etc/foundationdb/fdb.cluster
 sudo chmod 600 /etc/foundationdb/fdb.cluster
@@ -1578,7 +1589,7 @@ render_template "$STATE_DIR/stateless-bootstrap.sh" "$stateless_script"
 render_template "$STATE_DIR/bench-bootstrap.sh" "$bench_script"
 
 if [ "$RUN_STORAGE" -eq 1 ]; then
-  for ip in "${STORAGE_IPS[@]}"; do
+  for ip in "${STORAGE_PUBLIC_IPS[@]}"; do
     run_remote_script "storage" "$ip" "$storage_script"
   done
 else
@@ -1686,14 +1697,14 @@ if [[ -z "$STAT_NODE_IP" ]]; then
   exit 1
 fi
 
-STORAGE_IPS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.public_ip'))
+STORAGE_IPS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.private_ip'))
 if [ ${#STORAGE_IPS[@]} -eq 0 ]; then
   echo "No storage nodes found in instances.json" >&2
   exit 1
 fi
 
-COORDINATORS=$(printf "%s:4500," "${STORAGE_IPS[@]}")
-COORDINATORS=${COORDINATORS%,}
+COORDINATORS=$(printf "%s:4500 " "${STORAGE_IPS[@]}")
+COORDINATORS=${COORDINATORS%% }
 
 REMOTE_SCRIPT="$STATE_DIR/configure-cluster.remote.sh"
 cat >"$REMOTE_SCRIPT" <<SCRIPT
@@ -1884,7 +1895,7 @@ for ip in "${STATELESS_IPS[@]}"; do
 done
 
 EXPORTER_REMOTE=/tmp/exporter.sh
-for ip in "${STORAGE_IPS[@]}"; do
+for ip in "${STORAGE_PUBLIC_IPS[@]}"; do
   run_remote "$ip" "$STATE_DIR/exporter.sh" "$EXPORTER_REMOTE"
 done
 
