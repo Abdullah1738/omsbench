@@ -210,6 +210,8 @@ Checkpoint artifacts: `state/storage.json`, `s3://$STATE_BUCKET/state/storage.js
 
 Creates a single-AZ VPC with dedicated subnets, NAT gateway, interface endpoints for SSM, and CloudWatch VPC flow logs.
 
+> Tip: If you already have a VPC that matches the target CIDR, export `EXISTING_VPC_ID=<vpc-id>` before running the script to reuse it and avoid hitting AWS VPC quota limits.
+
 ```bash
 cat <<'EOF' > scripts/02-network.sh
 #!/usr/bin/env bash
@@ -229,23 +231,32 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text --regio
 
 get_or_create_vpc() {
   local vpc_id
-  vpc_id=$(aws ec2 describe-vpcs \
-    --filters "Name=tag:Cluster,Values=$CLUSTER_NAME" \
-              "Name=cidr,Values=$VPC_CIDR" \
-    --region "$REGION" \
-    | jq -r '.Vpcs[0].VpcId // empty')
-  if [ -z "$vpc_id" ]; then
-    vpc_id=$(aws ec2 create-vpc \
-      --cidr-block "$VPC_CIDR" \
-      --tag-specifications "ResourceType=vpc,Tags=[{Key=Name,Value=${CLUSTER_NAME}-vpc},{Key=Cluster,Value=$CLUSTER_NAME},{Key=Environment,Value=prod}]" \
-      --region "$REGION" \
-      | jq -r '.Vpc.VpcId')
-    aws ec2 modify-vpc-attribute --vpc-id "$vpc_id" --enable-dns-hostnames "{\"Value\":true}" --region "$REGION"
-    aws ec2 modify-vpc-attribute --vpc-id "$vpc_id" --enable-dns-support "{\"Value\":true}" --region "$REGION"
-    log "Created VPC $vpc_id"
+  if [ -n "${EXISTING_VPC_ID:-}" ]; then
+    vpc_id="$EXISTING_VPC_ID"
+    aws ec2 describe-vpcs --vpc-ids "$vpc_id" --region "$REGION" >/dev/null
+    log "Using existing VPC $vpc_id from \$EXISTING_VPC_ID"
   else
-    log "Reusing VPC $vpc_id"
+    vpc_id=$(aws ec2 describe-vpcs \
+      --filters "Name=tag:Cluster,Values=$CLUSTER_NAME" \
+                "Name=cidr,Values=$VPC_CIDR" \
+      --region "$REGION" \
+      | jq -r '.Vpcs[0].VpcId // empty')
+    if [ -z "$vpc_id" ]; then
+      if ! output=$(aws ec2 create-vpc \
+        --cidr-block "$VPC_CIDR" \
+        --tag-specifications "ResourceType=vpc,Tags=[{Key=Name,Value=${CLUSTER_NAME}-vpc},{Key=Cluster,Value=$CLUSTER_NAME},{Key=Environment,Value=prod}]" \
+        --region "$REGION"); then
+        log "ERROR: failed to create VPC (quota likely exceeded). Delete an unused VPC or set EXISTING_VPC_ID to reuse a pre-created VPC, then rerun."
+        exit 1
+      fi
+      vpc_id=$(echo "$output" | jq -r '.Vpc.VpcId')
+      log "Created VPC $vpc_id"
+    else
+      log "Reusing VPC $vpc_id"
+    fi
   fi
+  aws ec2 modify-vpc-attribute --vpc-id "$vpc_id" --enable-dns-hostnames '{"Value":true}' --region "$REGION"
+  aws ec2 modify-vpc-attribute --vpc-id "$vpc_id" --enable-dns-support '{"Value":true}' --region "$REGION"
   echo "$vpc_id"
 }
 
@@ -391,7 +402,6 @@ STORAGE_RT_ID=$(create_private_rt storage "$STORAGE_SUBNET_ID")
 STATELESS_RT_ID=$(create_private_rt stateless "$STATELESS_SUBNET_ID")
 BENCH_RT_ID=$(create_private_rt bench "$BENCH_SUBNET_ID")
 
-# Ensure service-linked role for VPC Flow Logs exists
 aws iam create-service-linked-role --aws-service-name vpc-flow-logs.amazonaws.com >/dev/null 2>&1 || true
 aws logs create-log-group --log-group-name "$FLOW_LOG_GROUP" --region "$REGION" >/dev/null 2>&1 || true
 
@@ -421,16 +431,24 @@ create_endpoint() {
     --region "$REGION" \
     | jq -r '.VpcEndpoints[0].VpcEndpointId // empty')
   if [ -z "$endpoint_id" ]; then
-    endpoint_id=$(aws ec2 create-vpc-endpoint \
+    local default_sg
+    default_sg=$(aws ec2 describe-security-groups \
+      --filters Name=vpc-id,Values=$VPC_ID Name=group-name,Values=default \
+      --region "$REGION" \
+      | jq -r '.SecurityGroups[0].GroupId')
+    if ! output=$(aws ec2 create-vpc-endpoint \
       --vpc-id "$VPC_ID" \
       --vpc-endpoint-type Interface \
       --service-name "com.amazonaws.${REGION}.${service}" \
-      --subnet-ids "$STORAGE_SUBNET_ID" "$STATELESS_SUBNET_ID" "$BENCH_SUBNET_ID" \
-      --security-group-ids "$(aws ec2 describe-security-groups --filters Name=vpc-id,Values=$VPC_ID Name=group-name,Values=default --region "$REGION" | jq -r '.SecurityGroups[0].GroupId')" \
+      --subnet-ids "$STATELESS_SUBNET_ID" \
+      --security-group-ids "$default_sg" \
       --private-dns-enabled \
       --tag-specifications "ResourceType=vpc-endpoint,Tags=[{Key=Name,Value=${CLUSTER_NAME}-${service}-endpoint},{Key=Cluster,Value=$CLUSTER_NAME}]" \
-      --region "$REGION" \
-      | jq -r '.VpcEndpoint.VpcEndpointId')
+      --region "$REGION"); then
+      log "ERROR: failed to create VPC endpoint for service $service. Resolve the AWS error (e.g. subnet AZ conflicts) and rerun."
+      exit 1
+    fi
+    endpoint_id=$(echo "$output" | jq -r '.VpcEndpoint.VpcEndpointId')
     aws ec2 wait vpc-endpoint-available --vpc-endpoint-ids "$endpoint_id" --region "$REGION"
     log "Created endpoint $endpoint_id for $service"
   else
@@ -476,6 +494,9 @@ aws ssm put-parameter \
   --region "$REGION"
 
 printf 'Network state saved to %s/network.json, S3, and SSM %s/infra/network\n' "$STATE_DIR" "$SSM_PARAMETER_PREFIX"
+
+EOF
+EOF
 EOF
 ```
 
