@@ -921,6 +921,12 @@ command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR="$SCRIPT_DIR/../state"
 source "$STATE_DIR/env.sh"
+KEY_NAME="${SSH_KEY_NAME:-${KEY_NAME:-}}"
+
+if [ -z "$KEY_NAME" ]; then
+  echo "Set SSH_KEY_NAME or KEY_NAME in state/env.sh to the EC2 key pair name." >&2
+  exit 1
+fi
 
 NETWORK_JSON=$(cat "$STATE_DIR/network.json")
 SECURITY_JSON=$(cat "$STATE_DIR/security-groups.json")
@@ -990,6 +996,7 @@ launch_instances() {
     --image-id "$AMI_ID" \
     --instance-type "$instance_type" \
     --iam-instance-profile "Name=$profile" \
+    --key-name "$KEY_NAME" \
     --subnet-id "$subnet_id" \
     --security-group-ids "$sg_id" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${CLUSTER_NAME}-${tier}},{Key=Cluster,Value=$CLUSTER_NAME},{Key=Environment,Value=prod},{Key=Tier,Value=$tier}]" \
