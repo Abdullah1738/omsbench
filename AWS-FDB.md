@@ -262,9 +262,107 @@ kubectl get nodes -o wide
 
 ---
 
-## 6. Install the FoundationDB Kubernetes Operator
+## 6. Install the AWS EBS CSI Driver
 
 ### 6.Resume
+```bash
+source env.fdb 2>/dev/null || true
+
+export ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text 2>/dev/null || true)
+export OIDC_ISSUER=$(aws eks describe-cluster --name ${CLUSTER_NAME} --region ${AWS_REGION} \
+  --query 'cluster.identity.oidc.issuer' --output text 2>/dev/null || true)
+if [ -n "${OIDC_ISSUER}" ] && [ "${OIDC_ISSUER}" != "None" ]; then
+  export OIDC_PROVIDER=${OIDC_ISSUER#https://}
+fi
+export EBS_CSI_ROLE_ARN=$(aws iam get-role \
+  --role-name ${CLUSTER_NAME}-ebs-csi-role \
+  --query 'Role.Arn' --output text 2>/dev/null || true)
+
+cat <<EOF >> env.fdb
+export ACCOUNT_ID=${ACCOUNT_ID}
+export OIDC_ISSUER=${OIDC_ISSUER}
+export OIDC_PROVIDER=${OIDC_PROVIDER}
+export EBS_CSI_ROLE_ARN=${EBS_CSI_ROLE_ARN}
+EOF
+```
+
+Associate an IAM OIDC provider with the cluster if one is not already registered:
+
+```bash
+if [ -n "${OIDC_ISSUER}" ] && [ "${OIDC_ISSUER}" != "None" ]; then
+  if ! aws iam list-open-id-connect-providers \
+    --query 'OpenIDConnectProviderList[].Arn' --output text | grep -q "${OIDC_PROVIDER}"; then
+    aws iam create-open-id-connect-provider \
+      --url "${OIDC_ISSUER}" \
+      --client-id-list sts.amazonaws.com \
+      --thumbprint-list 9e99a48a9960b14926bb7f3b02e22da0afd10a3d
+  fi
+fi
+```
+
+Create an IAM role for the driver’s controller service account and attach the AWS managed policy:
+
+```bash
+cat <<'POLICY' > ebs-csi-trust.json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_PROVIDER}"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "${OIDC_PROVIDER}:aud": "sts.amazonaws.com",
+          "${OIDC_PROVIDER}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+        }
+      }
+    }
+  ]
+}
+POLICY
+
+EBS_CSI_ROLE_ARN=$(aws iam create-role \
+  --role-name ${CLUSTER_NAME}-ebs-csi-role \
+  --assume-role-policy-document file://ebs-csi-trust.json \
+  --query 'Role.Arn' --output text)
+
+aws iam attach-role-policy \
+  --role-name ${CLUSTER_NAME}-ebs-csi-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+
+cat <<EOF >> env.fdb
+export EBS_CSI_ROLE_ARN=${EBS_CSI_ROLE_ARN}
+EOF
+```
+
+Deploy the managed add-on and wait for it to become active:
+
+```bash
+aws eks create-addon \
+  --cluster-name "$CLUSTER_NAME" \
+  --addon-name aws-ebs-csi-driver \
+  --service-account-role-arn "$EBS_CSI_ROLE_ARN" \
+  --resolve-conflicts OVERWRITE \
+  --region "$AWS_REGION"
+
+aws eks wait addon-active \
+  --cluster-name "$CLUSTER_NAME" \
+  --addon-name aws-ebs-csi-driver \
+  --region "$AWS_REGION"
+
+kubectl -n kube-system get pods -l app=ebs-csi-controller
+```
+
+You should see both the controller deployment and node daemonset in `Running` state before applying the FoundationDB manifests.
+
+---
+
+## 7. Install the FoundationDB Kubernetes Operator
+
+### 7.Resume
 ```bash
 source env.fdb 2>/dev/null || true
 
@@ -291,9 +389,9 @@ Monitor the operator logs until the controller reports it is watching the cluste
 
 ---
 
-## 7. Deploy a Multi-AZ FoundationDB Cluster
+## 8. Deploy a Multi-AZ FoundationDB Cluster
 
-### 7.Resume
+### 8.Resume
 ```bash
 source env.fdb 2>/dev/null || true
 
@@ -341,9 +439,9 @@ echo "FoundationDB public service: $FDB_LB"
 
 ---
 
-## 8. Provision the Benchmark EC2 Host
+## 9. Provision the Benchmark EC2 Host
 
-### 8.Resume
+### 9.Resume
 ```bash
 source env.fdb 2>/dev/null || true
 
@@ -417,9 +515,9 @@ scp -i ${CLUSTER_NAME}-bench.pem fdb.cluster ec2-user@${BENCH_PUBLIC_IP}:/home/e
 
 ---
 
-## 9. Build and Run the Benchmark
+## 10. Build and Run the Benchmark
 
-### 9.Resume
+### 10.Resume
 ```bash
 source env.fdb 2>/dev/null || true
 
@@ -470,9 +568,9 @@ FDB_CLUSTER_FILE=/home/ec2-user/fdb.cluster
 
 ---
 
-## 10. Observability (p50/p99 Latency)
+## 11. Observability (p50/p99 Latency)
 
-### 10.Resume
+### 11.Resume
 ```bash
 source env.fdb 2>/dev/null || true
 ```
@@ -496,9 +594,9 @@ You can scrape the endpoint with Amazon Managed Service for Prometheus or deploy
 
 ---
 
-## 11. Tuning for 100k–500k TPS
+## 12. Tuning for 100k–500k TPS
 
-### 11.Resume
+### 12.Resume
 ```bash
 source env.fdb 2>/dev/null || true
 ```
@@ -511,9 +609,9 @@ source env.fdb 2>/dev/null || true
 
 ---
 
-## 12. Cleanup
+## 13. Cleanup
 
-### 12.Resume
+### 13.Resume
 ```bash
 source env.fdb 2>/dev/null || true
 ```
@@ -541,9 +639,9 @@ rm -f ${CLUSTER_NAME}-bench.pem fdb.cluster
 
 ---
 
-## 13. Next Steps
+## 14. Next Steps
 
-### 13.Resume
+### 14.Resume
 ```bash
 source env.fdb 2>/dev/null || true
 ```
