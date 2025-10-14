@@ -507,9 +507,10 @@ Checkpoint artifacts: `state/network.json`, `s3://$STATE_BUCKET/state/network.js
 
 ## Step 03 – Create Security Groups
 
-Defines security boundaries for storage, stateless, and benchmark tiers with intra-cluster rules.
+Defines security boundaries for storage, stateless, and benchmark tiers with intra-cluster rules and points their route tables at the internet gateway so public IPv4 addresses stay reachable for SSH.
 
 > Set `SSH_ALLOWED_CIDR` in `state/env.sh` (for example, `SSH_ALLOWED_CIDR=203.0.113.0/24`) before running this step so SSH access is restricted to your network. If unset, the script defaults to `0.0.0.0/0`.
+> The script reuses `state/network.json` to swap the `storage`, `stateless`, and `bench` route tables (`0.0.0.0/0`) over to the internet gateway recorded in Step 02, ensuring those subnets can accept SSH to their public IPv4 addresses.
 
 ```bash
 cat <<'EOF' > scripts/03-security-groups.sh
@@ -527,6 +528,56 @@ log() {
 
 NETWORK_JSON=$(cat "$STATE_DIR/network.json")
 VPC_ID=$(echo "$NETWORK_JSON" | jq -r '.vpc_id')
+IGW_ID=$(echo "$NETWORK_JSON" | jq -r '.internet_gateway_id')
+STORAGE_RT_ID=$(echo "$NETWORK_JSON" | jq -r '.storage_route_table_id // empty')
+STATELESS_RT_ID=$(echo "$NETWORK_JSON" | jq -r '.stateless_route_table_id // empty')
+BENCH_RT_ID=$(echo "$NETWORK_JSON" | jq -r '.bench_route_table_id // empty')
+
+if [ -z "$IGW_ID" ] || [ "$IGW_ID" = "null" ]; then
+  log "Internet gateway ID missing from network.json; rerun Step 02 before continuing."
+  exit 1
+fi
+
+ensure_public_route() {
+  local tier=$1
+  local rt_id=$2
+  if [ -z "$rt_id" ] || [ "$rt_id" = "null" ]; then
+    log "Skipping IGW route update for $tier; no route table recorded."
+    return
+  fi
+
+  local current_via
+  current_via=$(aws ec2 describe-route-tables \
+    --route-table-ids "$rt_id" \
+    --region "$REGION" \
+    | jq -r '.RouteTables[0].Routes[] | select(.DestinationCidrBlock=="0.0.0.0/0") | (.GatewayId // .NatGatewayId // .NetworkInterfaceId // empty)')
+
+  if [ "$current_via" = "$IGW_ID" ]; then
+    log "Route table $rt_id already sends 0.0.0.0/0 to internet gateway for $tier."
+    return
+  fi
+
+  if aws ec2 replace-route \
+    --route-table-id "$rt_id" \
+    --destination-cidr-block "0.0.0.0/0" \
+    --gateway-id "$IGW_ID" \
+    --region "$REGION" >/dev/null 2>&1; then
+    log "Updated route table $rt_id to use internet gateway for $tier."
+    return
+  fi
+
+  if aws ec2 create-route \
+    --route-table-id "$rt_id" \
+    --destination-cidr-block "0.0.0.0/0" \
+    --gateway-id "$IGW_ID" \
+    --region "$REGION" >/dev/null 2>&1; then
+    log "Created default route via internet gateway for $tier (table $rt_id)."
+    return
+  fi
+
+  log "ERROR: Failed to configure internet gateway route for $tier (table $rt_id)."
+  exit 1
+}
 
 create_sg() {
   local name=$1
@@ -594,6 +645,11 @@ allow_rule "$STATELESS_SG_ID" tcp 4500 4599 "\"UserIdGroupPairs\":[{\"GroupId\":
 allow_ssh "$STORAGE_SG_ID"
 allow_ssh "$STATELESS_SG_ID"
 allow_ssh "$BENCH_SG_ID"
+
+# Ensure public IPv4 routes land on the internet gateway so SSH succeeds once instances receive public IPs
+ensure_public_route storage "$STORAGE_RT_ID"
+ensure_public_route stateless "$STATELESS_RT_ID"
+ensure_public_route bench "$BENCH_RT_ID"
 
 # Bench outbound only (SSM)
 allow_rule "$BENCH_SG_ID" tcp 2112 2112 "\"IpRanges\":[{\"CidrIp\":\"${OBSERVABILITY_CIDR}\"}]"
