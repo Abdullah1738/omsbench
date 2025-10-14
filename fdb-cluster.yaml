@@ -38,10 +38,10 @@ spec:
     cluster_controller: 1
     storage: 9
     log: 6
-    proxy: 12
-    commit_proxy: 12
-    grv_proxy: 6
-    stateless: 12
+    proxy: 6
+    commit_proxy: 6
+    grv_proxy: 3
+    stateless: 6
     data_distributor: 1
     ratekeeper: 1
   processes:
@@ -59,24 +59,24 @@ spec:
             - name: foundationdb
               resources:
                 requests:
-                  cpu: "4"
-                  memory: 12Gi
+                  cpu: "3"
+                  memory: 10Gi
                 limits:
-                  cpu: "6"
-                  memory: 16Gi
+                  cpu: "4"
+                  memory: 14Gi
             - name: foundationdb-kubernetes-sidecar
               resources:
                 requests:
+                  cpu: "0.5"
+                  memory: 1Gi
+                limits:
                   cpu: "1"
                   memory: 2Gi
-                limits:
-                  cpu: "2"
-                  memory: 4Gi
           initContainers:
             - name: foundationdb-kubernetes-init
               resources:
                 requests:
-                  cpu: 1
+                  cpu: "0.5"
                   memory: 512Mi
     storage:
       volumeClaimTemplate:
