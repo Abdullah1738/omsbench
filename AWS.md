@@ -221,6 +221,10 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR="$SCRIPT_DIR/../state"
 source "$STATE_DIR/env.sh"
 
+log() {
+  printf '%s\n' "$*" >&2
+}
+
 ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text --region "$REGION")
 
 get_or_create_vpc() {
@@ -238,9 +242,9 @@ get_or_create_vpc() {
       | jq -r '.Vpc.VpcId')
     aws ec2 modify-vpc-attribute --vpc-id "$vpc_id" --enable-dns-hostnames "{\"Value\":true}" --region "$REGION"
     aws ec2 modify-vpc-attribute --vpc-id "$vpc_id" --enable-dns-support "{\"Value\":true}" --region "$REGION"
-    echo "Created VPC $vpc_id"
+    log "Created VPC $vpc_id"
   else
-    echo "Reusing VPC $vpc_id"
+    log "Reusing VPC $vpc_id"
   fi
   echo "$vpc_id"
 }
@@ -267,9 +271,9 @@ get_or_create_subnet() {
     if [ "$map_public" = "true" ]; then
       aws ec2 modify-subnet-attribute --subnet-id "$subnet_id" --map-public-ip-on-launch --region "$REGION"
     fi
-    echo "Created subnet $subnet_id for $name"
+    log "Created subnet $subnet_id for $name"
   else
-    echo "Reusing subnet $subnet_id for $name"
+    log "Reusing subnet $subnet_id for $name"
   fi
   echo "$subnet_id"
 }
@@ -290,9 +294,9 @@ if [ -z "$IGW_ID" ]; then
     --region "$REGION" \
     | jq -r '.InternetGateway.InternetGatewayId')
   aws ec2 attach-internet-gateway --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID" --region "$REGION"
-  echo "Created IGW $IGW_ID"
+  log "Created IGW $IGW_ID"
 else
-  echo "Reusing IGW $IGW_ID"
+  log "Reusing IGW $IGW_ID"
 fi
 
 allocate_eip_if_needed() {
@@ -307,9 +311,9 @@ allocate_eip_if_needed() {
       --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=${CLUSTER_NAME}-nat-eip},{Key=Cluster,Value=$CLUSTER_NAME}]" \
       --region "$REGION" \
       | jq -r '.AllocationId')
-    echo "Allocated EIP $allocation_id"
+    log "Allocated EIP $allocation_id"
   else
-    echo "Reusing EIP $allocation_id"
+    log "Reusing EIP $allocation_id"
   fi
   echo "$allocation_id"
 }
@@ -332,9 +336,9 @@ if [ -z "$PUBLIC_RT_ID" ]; then
     --destination-cidr-block "0.0.0.0/0" \
     --gateway-id "$IGW_ID" \
     --region "$REGION" || true
-  echo "Created public route table $PUBLIC_RT_ID"
+  log "Created public route table $PUBLIC_RT_ID"
 else
-  echo "Reusing public route table $PUBLIC_RT_ID"
+  log "Reusing public route table $PUBLIC_RT_ID"
 fi
 
 NAT_ID=$(aws ec2 describe-nat-gateways \
@@ -351,9 +355,9 @@ if [ -z "$NAT_ID" ]; then
     --region "$REGION" \
     | jq -r '.NatGateway.NatGatewayId')
   aws ec2 wait nat-gateway-available --nat-gateway-ids "$NAT_ID" --region "$REGION"
-  echo "Created NAT $NAT_ID"
+  log "Created NAT $NAT_ID"
 else
-  echo "Reusing NAT $NAT_ID"
+  log "Reusing NAT $NAT_ID"
 fi
 
 create_private_rt() {
@@ -376,9 +380,9 @@ create_private_rt() {
       --destination-cidr-block "0.0.0.0/0" \
       --nat-gateway-id "$NAT_ID" \
       --region "$REGION" || true
-    echo "Created route table $rt_id for $name"
+    log "Created route table $rt_id for $name"
   else
-    echo "Reusing route table $rt_id for $name"
+    log "Reusing route table $rt_id for $name"
   fi
   echo "$rt_id"
 }
@@ -404,9 +408,9 @@ if [ -z "$FLOW_LOG_ID" ]; then
     --deliver-logs-permission-arn "arn:aws:iam::$ACCOUNT_ID:role/aws-service-role/vpc-flow-logs.amazonaws.com/AWSServiceRoleForVPCFlowLogs" \
     --region "$REGION" \
     | jq -r '.FlowLogIds[0]')
-  echo "Created flow log $FLOW_LOG_ID"
+  log "Created flow log $FLOW_LOG_ID"
 else
-  echo "Reusing flow log $FLOW_LOG_ID"
+  log "Reusing flow log $FLOW_LOG_ID"
 fi
 
 create_endpoint() {
@@ -428,9 +432,9 @@ create_endpoint() {
       --region "$REGION" \
       | jq -r '.VpcEndpoint.VpcEndpointId')
     aws ec2 wait vpc-endpoint-available --vpc-endpoint-ids "$endpoint_id" --region "$REGION"
-    echo "Created endpoint $endpoint_id for $service"
+    log "Created endpoint $endpoint_id for $service"
   else
-    echo "Reusing endpoint $endpoint_id for $service"
+    log "Reusing endpoint $endpoint_id for $service"
   fi
   echo "$endpoint_id"
 }
@@ -493,6 +497,10 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR="$SCRIPT_DIR/../state"
 source "$STATE_DIR/env.sh"
 
+log() {
+  printf '%s\n' "$*" >&2
+}
+
 NETWORK_JSON=$(cat "$STATE_DIR/network.json")
 VPC_ID=$(echo "$NETWORK_JSON" | jq -r '.vpc_id')
 
@@ -512,9 +520,9 @@ create_sg() {
       --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=${CLUSTER_NAME}-${name}-sg},{Key=Cluster,Value=$CLUSTER_NAME},{Key=Tier,Value=$name}]" \
       --region "$REGION" \
       | jq -r '.GroupId')
-    echo "Created SG $sg_id for $name"
+    log "Created SG $sg_id for $name"
   else
-    echo "Reusing SG $sg_id for $name"
+    log "Reusing SG $sg_id for $name"
   fi
   echo "$sg_id"
 }
