@@ -1128,9 +1128,9 @@ Downloads the required RPMs directly from the 7.3.69 release, formats NVMe stora
 > Ensure SSH access is configured (see Step 03 for `SSH_ALLOWED_CIDR`) and provide the EC2 private key via `SSH_KEY_PATH` or as the first argument when invoking the script (for example, `bash scripts/07-bootstrap-fdb.sh ~/.ssh/abdullah.pem`).
 > FoundationDB Go bindings are not yet compatible with Go toolchains newer than 1.21; leave `GO_VERSION` at 1.21.7 (the default above) or the bootstrap will fail when compiling the benchmark.
 > Pass `--start-tier=bench` (or `stateless`) to skip earlier tiers when iterating on later stages.
+> Bench nodes must be x86_64; the script exits early otherwise and always installs the x86 FoundationDB client RPM.
 
 ```bash
-cat <<'EOF' > scripts/07-bootstrap-fdb.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -1302,8 +1302,8 @@ select_rpm() {
   echo ""
 }
 
-SERVER_RPM_URL=$(select_rpm server)
-CLIENT_RPM_URL=$(select_rpm clients)
+SERVER_RPM_URL=$(select_rpm server "x86_64")
+CLIENT_RPM_URL=$(select_rpm clients "x86_64")
 
 if [ -z "$SERVER_RPM_URL" ] || [ -z "$CLIENT_RPM_URL" ]; then
   echo "Unable to locate FoundationDB server/client RPM assets for version ${FDB_VERSION}" >&2
@@ -1521,6 +1521,12 @@ BENCH_NAMESPACE="{{BENCH_NAMESPACE}}"
 sudo dnf update -y
 sudo dnf install -y jq git tar
 
+ARCH=$(uname -m)
+if [[ "$ARCH" != "x86_64" ]]; then
+  echo "Bench bootstrap requires an x86_64 host; detected $ARCH" >&2
+  exit 1
+fi
+
 tmpdir=$(mktemp -d)
 curl -fsSL "$CLIENT_RPM_URL" -o "$tmpdir/clients.rpm"
 sudo rpm -Uvh --replacepkgs "$tmpdir/clients.rpm"
@@ -1549,8 +1555,14 @@ fi
 export PATH=/usr/local/go/bin:$PATH
 export GOTOOLCHAIN=local
 export CGO_ENABLED=1
+export GOOS=linux
+export GOARCH=amd64
 go env -w GOTOOLCHAIN=local >/dev/null 2>&1 || true
-go build ./internal/bench
+mkdir -p bin
+sudo yum update -y
+sudo yum groupinstall "Development Tools" -y
+go mod tidy
+go build -o bin/omsbench ./cmd/omsbench
 cat <<EOF >/opt/bench/.bench.env
 export FDB_CLUSTER_FILE=/etc/foundationdb/fdb.cluster
 export BENCH_NAMESPACE=$BENCH_NAMESPACE
@@ -1593,35 +1605,6 @@ else
 fi
 
 printf 'FoundationDB packages deployed and cluster file distributed. Cluster ID %s\n' "$CLUSTER_ID"
-
-EOF
-EOF
-SCRIPT
-
-storage_script="$STATE_DIR/storage-bootstrap-rendered.sh"
-stateless_script="$STATE_DIR/stateless-bootstrap-rendered.sh"
-bench_script="$STATE_DIR/bench-bootstrap-rendered.sh"
-
-render_template "$STATE_DIR/storage-bootstrap.sh" "$storage_script"
-render_template "$STATE_DIR/stateless-bootstrap.sh" "$stateless_script"
-render_template "$STATE_DIR/bench-bootstrap.sh" "$bench_script"
-
-for ip in "${STORAGE_IPS[@]}"; do
-  run_remote_script "storage" "$ip" "$storage_script"
-done
-
-STATELESS_IPS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.public_ip'))
-for ip in "${STATELESS_IPS[@]}"; do
-  run_remote_script "stateless" "$ip" "$stateless_script"
-done
-
-if [[ -n "$BENCH_IP" ]]; then
-  run_remote_script "bench" "$BENCH_IP" "$bench_script"
-fi
-
-printf 'FoundationDB packages deployed and cluster file distributed. Cluster ID %s\n' "$CLUSTER_ID"
-
-EOF
 ```
 
 Run:
