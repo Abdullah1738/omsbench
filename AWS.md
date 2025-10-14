@@ -1300,17 +1300,37 @@ sudo dnf update -y
 sudo dnf install -y jq nvme-cli chrony xfsprogs
 sudo systemctl enable --now chronyd
 
+DATA_MOUNT=""
+
 for dev in $(ls /dev/nvme*n1 2>/dev/null); do
+  if lsblk -rno NAME "$dev" | tail -n +2 | grep -q .; then
+    echo "Skipping $dev (has partitions)"
+    continue
+  fi
+  if findmnt -rn -S "$dev" >/dev/null 2>&1; then
+    echo "Skipping $dev (already mounted)"
+    continue
+  fi
+
   mount_point="/data/$(basename "$dev")"
   sudo umount "$dev" >/dev/null 2>&1 || true
   sudo mkfs.xfs -f "$dev"
   sudo mkdir -p "$mount_point"
   grep -q "$dev" /etc/fstab || echo "$dev $mount_point xfs defaults,noatime 0 0" | sudo tee -a /etc/fstab >/dev/null
   sudo mount "$mount_point"
+
+  if [ -z "$DATA_MOUNT" ]; then
+    DATA_MOUNT="$mount_point"
+  fi
 done
 
-sudo mkdir -p /data/nvme0/fdb-{4500,4501,4502,4503,4504,4505}
-sudo chown -R foundationdb:foundationdb /data/nvme0
+if [ -z "$DATA_MOUNT" ]; then
+  echo "No available NVMe devices were prepared for FoundationDB; ensure the instance exposes local NVMe." >&2
+  exit 1
+fi
+
+sudo mkdir -p "$DATA_MOUNT"/fdb-{4500,4501,4502,4503,4504,4505}
+sudo chown -R foundationdb:foundationdb "$DATA_MOUNT"
 
 tmpdir=$(mktemp -d)
 curl -fsSL "$SERVER_RPM_URL" -o "$tmpdir/server.rpm"
@@ -1333,7 +1353,7 @@ cluster_file = /etc/foundationdb/fdb.cluster
 command = /usr/sbin/fdbserver
 listen_address = PUBLIC
 public_address = auto:\$ID
-datadir = /data/nvme0/fdb-\$ID
+datadir = ${DATA_MOUNT}/fdb-\$ID
 logdir = /var/log/foundationdb
 class = storage
 storage_engine = ssd-redwood-1
