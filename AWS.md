@@ -928,7 +928,7 @@ Checkpoint artifacts: `state/kms.json`, `s3://$STATE_BUCKET/state/kms.json`, SSM
 
 ## Step 06 – Launch EC2 Instances (Storage, Stateless, Benchmark)
 
-Creates placement groups, fetches the latest Amazon Linux 2023 AMI, and launches EC2 instances tagged per tier.
+Creates placement groups, fetches the latest Amazon Linux 2023 AMI, and launches EC2 instances tagged per tier with public IPv4 addresses for SSH access (restricted by `SSH_ALLOWED_CIDR` from Step 03).
 
 ```bash
 cat <<'EOF' > scripts/06-compute.sh
@@ -1019,6 +1019,7 @@ launch_instances() {
     --subnet-id "$subnet_id" \
     --security-group-ids "$sg_id" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${CLUSTER_NAME}-${tier}},{Key=Cluster,Value=$CLUSTER_NAME},{Key=Environment,Value=prod},{Key=Tier,Value=$tier}]" \
+    --associate-public-ip-address \
     --placement "AvailabilityZone=$AZ,GroupName=$placement_group" \
     --block-device-mappings '[
         {"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":100,"VolumeType":"gp3","DeleteOnTermination":true}}
@@ -1042,7 +1043,7 @@ INSTANCES_JSON=$(aws ec2 describe-instances \
   --filters "Name=tag:Cluster,Values=$CLUSTER_NAME" \
             "Name=instance-state-name,Values=running,stopped" \
   --region "$REGION" \
-  | jq '[.Reservations[].Instances[] | select(.State.Name != "terminated")] | group_by(.Tags[] | select(.Key=="Tier") | .Value) | map({(.[0].Tags[] | select(.Key=="Tier") | .Value): map({instance_id: .InstanceId, private_ip: .PrivateIpAddress})}) | add')
+  | jq '[.Reservations[].Instances[] | select(.State.Name != "terminated")] | group_by(.Tags[] | select(.Key=="Tier") | .Value) | map({(.[0].Tags[] | select(.Key=="Tier") | .Value): map({instance_id: .InstanceId, private_ip: .PrivateIpAddress, public_ip: (.PublicIpAddress // null)})}) | add')
 
 echo "$INSTANCES_JSON" | jq '.' > "$STATE_DIR/instances.json"
 aws s3 cp "$STATE_DIR/instances.json" "s3://${STATE_BUCKET}/state/instances.json"
@@ -1060,7 +1061,7 @@ EOF
 ```
 
 Run: `bash scripts/06-compute.sh`  
-Checkpoint artifacts: `state/instances.json`, `s3://$STATE_BUCKET/state/instances.json`, SSM `${SSM_PARAMETER_PREFIX}/infra/instances`.
+Checkpoint artifacts: `state/instances.json`, `s3://$STATE_BUCKET/state/instances.json`, SSM `${SSM_PARAMETER_PREFIX}/infra/instances` (includes both private and public IPv4 addresses per tier).
 
 ---
 
