@@ -1705,11 +1705,13 @@ sudo fdbcli --exec "configure new triple ssd-redwood-1 logs=8 commit_proxies=4 g
 sudo fdbcli --exec "status details" | tee /tmp/fdb-status.txt
 SCRIPT
 
-TARGET=/tmp/configure-cluster.sh
 wait_for_ssh "$STAT_NODE_IP"
-scp "${SCP_OPTS[@]}" "$REMOTE_SCRIPT" "$SSH_USER@$STAT_NODE_IP:$TARGET"
-ssh "${SSH_OPTS[@]}" "$SSH_USER@$STAT_NODE_IP" "chmod +x $TARGET && sudo bash $TARGET"
+REMOTE_HOME=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$STAT_NODE_IP" 'cd ~ && pwd')
+REMOTE_DEST="$REMOTE_HOME/configure-cluster.sh"
+scp "${SCP_OPTS[@]}" "$REMOTE_SCRIPT" "$SSH_USER@$STAT_NODE_IP:$REMOTE_DEST"
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$STAT_NODE_IP" "chmod +x '$REMOTE_DEST' && sudo bash '$REMOTE_DEST'"
 scp "${SCP_OPTS[@]}" "$SSH_USER@$STAT_NODE_IP:/tmp/fdb-status.txt" "$STATE_DIR/fdb-status-initial.txt"
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$STAT_NODE_IP" "rm -f '$REMOTE_DEST'" || true
 
 rm -f "$REMOTE_SCRIPT"
 aws s3 cp "$STATE_DIR/fdb-status-initial.txt" "s3://${STATE_BUCKET}/state/fdb-status-initial.txt" --region "$REGION"
@@ -1791,8 +1793,12 @@ run_remote() {
   local local_script=$2
   local remote_path=$3
   wait_for_ssh "$ip"
-  scp "${SCP_OPTS[@]}" "$local_script" "$SSH_USER@$ip:$remote_path"
-  ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" "chmod +x $remote_path && sudo bash $remote_path"
+  local remote_home
+  remote_home=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" 'cd ~ && pwd')
+  local stage_path="$remote_home/$(basename "$remote_path")"
+  scp "${SCP_OPTS[@]}" "$local_script" "$SSH_USER@$ip:$stage_path"
+  ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" "chmod +x '$stage_path' && sudo bash '$stage_path'"
+  ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" "rm -f '$stage_path'" || true
 }
 
 INSTANCES_JSON=$(cat "$STATE_DIR/instances.json")
@@ -1989,10 +1995,12 @@ sed -e "s|{{BENCH_NAMESPACE}}|$BENCH_NAMESPACE|g" \
     -e "s|{{BENCH_BUCKET}}|$BENCH_BUCKET|g" \
     "$STATE_DIR/bench-template.sh" > "$STATE_DIR/bench.sh"
 
-TARGET=/tmp/bench.sh
 wait_for_ssh "$BENCH_IP"
-scp "${SCP_OPTS[@]}" "$STATE_DIR/bench.sh" "$SSH_USER@$BENCH_IP:$TARGET"
-ssh "${SSH_OPTS[@]}" "$SSH_USER@$BENCH_IP" "chmod +x $TARGET && bash $TARGET"
+REMOTE_HOME=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$BENCH_IP" 'cd ~ && pwd')
+REMOTE_SCRIPT_PATH="$REMOTE_HOME/bench.sh"
+scp "${SCP_OPTS[@]}" "$STATE_DIR/bench.sh" "$SSH_USER@$BENCH_IP:$REMOTE_SCRIPT_PATH"
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$BENCH_IP" "chmod +x '$REMOTE_SCRIPT_PATH' && bash '$REMOTE_SCRIPT_PATH'"
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$BENCH_IP" "rm -f '$REMOTE_SCRIPT_PATH'" || true
 
 rm -f "$STATE_DIR/bench-template.sh"
 printf 'Benchmark completed as %s; logs stored at s3://%s/runs/%s.log\n' "$RUN_NAME" "$BENCH_BUCKET" "$RUN_NAME"
