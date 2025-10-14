@@ -509,6 +509,8 @@ Checkpoint artifacts: `state/network.json`, `s3://$STATE_BUCKET/state/network.js
 
 Defines security boundaries for storage, stateless, and benchmark tiers with intra-cluster rules.
 
+> Set `SSH_ALLOWED_CIDR` in `state/env.sh` (for example, `SSH_ALLOWED_CIDR=203.0.113.0/24`) before running this step so SSH access is restricted to your network. If unset, the script defaults to `0.0.0.0/0`.
+
 ```bash
 cat <<'EOF' > scripts/03-security-groups.sh
 #!/usr/bin/env bash
@@ -517,6 +519,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR="$SCRIPT_DIR/../state"
 source "$STATE_DIR/env.sh"
+SSH_ALLOWED_CIDR=${SSH_ALLOWED_CIDR:-0.0.0.0/0}
 
 log() {
   printf '%s\n' "$*" >&2
@@ -564,6 +567,16 @@ allow_rule() {
     --region "$REGION" >/dev/null 2>&1 || true
 }
 
+allow_ssh() {
+  local sg_id=$1
+  aws ec2 authorize-security-group-ingress \
+    --group-id "$sg_id" \
+    --protocol tcp \
+    --port 22 \
+    --cidr "$SSH_ALLOWED_CIDR" \
+    --region "$REGION" >/dev/null 2>&1 || true
+}
+
 # Egress allow all
 aws ec2 revoke-security-group-egress --group-id "$STORAGE_SG_ID" --ip-permission 'IpProtocol=-1,IpRanges=[]' --region "$REGION" >/dev/null 2>&1 || true
 aws ec2 authorize-security-group-egress --group-id "$STORAGE_SG_ID" --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]' --region "$REGION" >/dev/null 2>&1 || true
@@ -577,6 +590,10 @@ allow_rule "$STORAGE_SG_ID" tcp 4500 4599 "\"UserIdGroupPairs\":[{\"GroupId\":\"
 
 # Stateless inbound (from storage/stateless)
 allow_rule "$STATELESS_SG_ID" tcp 4500 4599 "\"UserIdGroupPairs\":[{\"GroupId\":\"$STORAGE_SG_ID\"},{\"GroupId\":\"$STATELESS_SG_ID\"}]"
+
+allow_ssh "$STORAGE_SG_ID"
+allow_ssh "$STATELESS_SG_ID"
+allow_ssh "$BENCH_SG_ID"
 
 # Bench outbound only (SSM)
 allow_rule "$BENCH_SG_ID" tcp 2112 2112 "\"IpRanges\":[{\"CidrIp\":\"${OBSERVABILITY_CIDR}\"}]"
@@ -598,6 +615,8 @@ aws ssm put-parameter \
   --region "$REGION"
 
 printf 'Security groups persisted to %s/security-groups.json and SSM %s/infra/security-groups\n' "$STATE_DIR" "$SSM_PARAMETER_PREFIX"
+
+EOF
 EOF
 ```
 
@@ -924,7 +943,7 @@ source "$STATE_DIR/env.sh"
 KEY_NAME="${SSH_KEY_NAME:-${KEY_NAME:-}}"
 
 if [ -z "$KEY_NAME" ]; then
-  echo "Set SSH_KEY_NAME or KEY_NAME in state/env.sh to the EC2 key pair name." >&2
+  echo "Set SSH_KEY_NAME or KEY_NAME in env.sh to the EC2 key pair name." >&2
   exit 1
 fi
 
@@ -1035,6 +1054,8 @@ aws ssm put-parameter \
   --region "$REGION"
 
 printf 'Instance inventory written to %s/instances.json and SSM %s/infra/instances\n' "$STATE_DIR" "$SSM_PARAMETER_PREFIX"
+
+EOF
 EOF
 ```
 
@@ -1046,6 +1067,8 @@ Checkpoint artifacts: `state/instances.json`, `s3://$STATE_BUCKET/state/instance
 ## Step 07 – Bootstrap Hosts and Install FoundationDB
 
 Downloads the required RPMs directly from the 7.3.69 release, formats NVMe storage, writes `foundationdb.conf`, and distributes the cluster file across storage/stateless/benchmark nodes.
+
+> Ensure SSH access is configured (see Step 03 for `SSH_ALLOWED_CIDR`) and provide the EC2 private key via `SSH_KEY_PATH` or as the first argument when invoking the script (for example, `bash scripts/07-bootstrap-fdb.sh ~/.ssh/abdullah.pem`).
 
 ```bash
 cat <<'EOF' > scripts/07-bootstrap-fdb.sh
@@ -1059,12 +1082,42 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR="$SCRIPT_DIR/../state"
 source "$STATE_DIR/env.sh"
 
+log() {
+  printf '%s\n' "$*" >&2
+}
+
+KEY_ARG=${1:-}
+if [[ -n "$KEY_ARG" ]]; then
+  SSH_KEY_PATH="$KEY_ARG"
+fi
+
+if [[ -z "${SSH_KEY_PATH:-}" ]]; then
+  echo "Usage: $0 /path/to/private-key" >&2
+  echo "       or export SSH_KEY_PATH before running." >&2
+  exit 1
+fi
+
+if [[ ! -f "$SSH_KEY_PATH" ]]; then
+  echo "SSH key $SSH_KEY_PATH not found." >&2
+  exit 1
+fi
+
+SSH_USER=${SSH_USER:-ec2-user}
+SSH_OPTS=(
+  -i "$SSH_KEY_PATH"
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=10
+  -o BatchMode=yes
+)
+
 INSTANCES_JSON=$(cat "$STATE_DIR/instances.json")
 
 STORAGE_IPS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.private_ip'))
 STORAGE_IDS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.instance_id'))
 STATELESS_IDS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.instance_id'))
 BENCH_ID=$(echo "$INSTANCES_JSON" | jq -r '.bench[0]?.instance_id')
+BENCH_IP=$(echo "$INSTANCES_JSON" | jq -r '.bench[0]?.private_ip // empty')
 
 if [ ${#STORAGE_IPS[@]} -ne 5 ]; then
   echo "Expected 5 storage nodes; found ${#STORAGE_IPS[@]}" >&2
@@ -1106,19 +1159,72 @@ aws ssm put-parameter \
 
 release_json=$(curl -fsSL "https://api.github.com/repos/apple/foundationdb/releases/tags/${FDB_VERSION}")
 
-select_asset() {
-  local pattern=$1
-  echo "$release_json" | jq -r --arg pattern "$pattern" '.assets[] | select(.name|test($pattern)) | .browser_download_url' | head -n1
+select_rpm() {
+  local component=$1
+  local arch=${2:-x86_64}
+  local url
+  for distro in el9 el8 el7; do
+    local name="foundationdb-${component}-${FDB_VERSION}-1.${distro}.${arch}.rpm"
+    url=$(echo "$release_json" | jq -r --arg name "$name" '.assets[] | select(.name==$name) | .browser_download_url')
+    if [ -n "$url" ] && [ "$url" != "null" ]; then
+      echo "$url"
+      return
+    fi
+  done
+  echo ""
 }
 
-SERVER_RPM_URL=$(select_asset "foundationdb-server-${FDB_VERSION}-1.el[89].x86_64.rpm$")
-CLIENT_RPM_URL=$(select_asset "foundationdb-clients-${FDB_VERSION}-1.el[89].x86_64.rpm$")
-BACKUP_RPM_URL=$(select_asset "foundationdb-backup-${FDB_VERSION}-1.el[89].x86_64.rpm$")
+SERVER_RPM_URL=$(select_rpm server)
+CLIENT_RPM_URL=$(select_rpm clients)
 
-if [ -z "$SERVER_RPM_URL" ] || [ -z "$CLIENT_RPM_URL" ] || [ -z "$BACKUP_RPM_URL" ]; then
-  echo "Unable to locate FoundationDB RPM assets for version ${FDB_VERSION}" >&2
+if [ -z "$SERVER_RPM_URL" ] || [ -z "$CLIENT_RPM_URL" ]; then
+  echo "Unable to locate FoundationDB server/client RPM assets for version ${FDB_VERSION}" >&2
   exit 1
 fi
+
+wait_for_ssh() {
+  local ip=$1
+  local attempt=1
+  while [ $attempt -le 36 ]; do
+    if ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" 'exit 0' >/dev/null 2>&1; then
+      log "SSH reachable: $ip"
+      return
+    fi
+    log "Waiting for SSH on $ip (attempt $attempt/36)..."
+    sleep 5
+    attempt=$((attempt + 1))
+  done
+  echo "ERROR: Unable to reach $ip via SSH after waiting." >&2
+  exit 1
+}
+
+render_template() {
+  local template=$1
+  local destination=$2
+  sed -e "s|{{FDB_VERSION}}|$FDB_VERSION|g" \
+      -e "s|{{SERVER_RPM_URL}}|$SERVER_RPM_URL|g" \
+      -e "s|{{CLIENT_RPM_URL}}|$CLIENT_RPM_URL|g" \
+      -e "s|{{CLUSTER_FILE_B64}}|$CLUSTER_FILE_B64|g" \
+      -e "s|{{REGION}}|$REGION|g" \
+      -e "s|{{SSM_PARAMETER_PREFIX}}|$SSM_PARAMETER_PREFIX|g" \
+      -e "s|{{BENCH_REPO_URL}}|$BENCH_REPO_URL|g" \
+      -e "s|{{BENCH_REPO_REF}}|$BENCH_REPO_REF|g" \
+      -e "s|{{GO_VERSION}}|$GO_VERSION|g" \
+      -e "s|{{BENCH_NAMESPACE}}|$BENCH_NAMESPACE|g" \
+      "$template" > "$destination"
+}
+
+run_remote_script() {
+  local tier=$1
+  local ip=$2
+  local script_path=$3
+  local remote="/tmp/bootstrap-${tier}.sh"
+  wait_for_ssh "$ip"
+  log "Uploading ${tier} bootstrap to $ip"
+  scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 "$script_path" "$SSH_USER@$ip:$remote"
+  log "Executing ${tier} bootstrap on $ip"
+  ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" "chmod +x $remote && sudo bash $remote"
+}
 
 CLUSTER_FILE_B64=$(base64 <"$STATE_DIR/fdb.cluster" | tr -d '\n')
 
@@ -1129,7 +1235,6 @@ set -euo pipefail
 FDB_VERSION="{{FDB_VERSION}}"
 SERVER_RPM_URL="{{SERVER_RPM_URL}}"
 CLIENT_RPM_URL="{{CLIENT_RPM_URL}}"
-BACKUP_RPM_URL="{{BACKUP_RPM_URL}}"
 CLUSTER_FILE_B64="{{CLUSTER_FILE_B64}}"
 REGION="{{REGION}}"
 SSM_PARAMETER_PREFIX="{{SSM_PARAMETER_PREFIX}}"
@@ -1153,7 +1258,6 @@ sudo chown -R foundationdb:foundationdb /data/nvme0
 tmpdir=$(mktemp -d)
 curl -fsSL "$SERVER_RPM_URL" -o "$tmpdir/server.rpm"
 curl -fsSL "$CLIENT_RPM_URL" -o "$tmpdir/clients.rpm"
-curl -fsSL "$BACKUP_RPM_URL" -o "$tmpdir/backup.rpm"
 sudo rpm -Uvh --replacepkgs "$tmpdir/"*.rpm
 
 echo "$CLUSTER_FILE_B64" | base64 -d | sudo tee /etc/foundationdb/fdb.cluster >/dev/null
@@ -1198,7 +1302,6 @@ set -euo pipefail
 FDB_VERSION="{{FDB_VERSION}}"
 SERVER_RPM_URL="{{SERVER_RPM_URL}}"
 CLIENT_RPM_URL="{{CLIENT_RPM_URL}}"
-BACKUP_RPM_URL="{{BACKUP_RPM_URL}}"
 CLUSTER_FILE_B64="{{CLUSTER_FILE_B64}}"
 
 sudo dnf update -y
@@ -1208,7 +1311,6 @@ sudo systemctl enable --now chronyd
 tmpdir=$(mktemp -d)
 curl -fsSL "$SERVER_RPM_URL" -o "$tmpdir/server.rpm"
 curl -fsSL "$CLIENT_RPM_URL" -o "$tmpdir/clients.rpm"
-curl -fsSL "$BACKUP_RPM_URL" -o "$tmpdir/backup.rpm"
 sudo rpm -Uvh --replacepkgs "$tmpdir/"*.rpm
 
 sudo mkdir -p /var/lib/foundationdb/data/{4500,4501,4502,4503,4504,4505}
@@ -1294,63 +1396,66 @@ export BENCH_NAMESPACE=$BENCH_NAMESPACE
 EOF
 SCRIPT
 
-S3_SCRIPT_PREFIX="scripts/bootstrap"
+storage_script="$STATE_DIR/storage-bootstrap-rendered.sh"
+stateless_script="$STATE_DIR/stateless-bootstrap-rendered.sh"
+bench_script="$STATE_DIR/bench-bootstrap-rendered.sh"
 
-substitute_and_send() {
-  local template=$1
-  local tier=$2
-  local target=$3
-  shift 3
-  local wait_ids=("$@")
-  local rendered="$STATE_DIR/${tier}-rendered.sh"
-  local key="${S3_SCRIPT_PREFIX}-${tier}-${ENV_ID}.sh"
+render_template "$STATE_DIR/storage-bootstrap.sh" "$storage_script"
+render_template "$STATE_DIR/stateless-bootstrap.sh" "$stateless_script"
+render_template "$STATE_DIR/bench-bootstrap.sh" "$bench_script"
 
-  sed -e "s|{{FDB_VERSION}}|$FDB_VERSION|g" \
-      -e "s|{{SERVER_RPM_URL}}|$SERVER_RPM_URL|g" \
-      -e "s|{{CLIENT_RPM_URL}}|$CLIENT_RPM_URL|g" \
-      -e "s|{{BACKUP_RPM_URL}}|$BACKUP_RPM_URL|g" \
-      -e "s|{{CLUSTER_FILE_B64}}|$CLUSTER_FILE_B64|g" \
-      -e "s|{{REGION}}|$REGION|g" \
-      -e "s|{{SSM_PARAMETER_PREFIX}}|$SSM_PARAMETER_PREFIX|g" \
-      -e "s|{{BENCH_REPO_URL}}|$BENCH_REPO_URL|g" \
-      -e "s|{{BENCH_REPO_REF}}|$BENCH_REPO_REF|g" \
-      -e "s|{{GO_VERSION}}|$GO_VERSION|g" \
-      -e "s|{{BENCH_NAMESPACE}}|$BENCH_NAMESPACE|g" \
-      "$template" > "$rendered"
+for ip in "${STORAGE_IPS[@]}"; do
+  run_remote_script "storage" "$ip" "$storage_script"
+done
 
-  aws s3 cp "$rendered" "s3://${STATE_BUCKET}/${key}" --region "$REGION"
+STATELESS_IPS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.private_ip'))
+for ip in "${STATELESS_IPS[@]}"; do
+  run_remote_script "stateless" "$ip" "$stateless_script"
+done
 
-  cat >"$STATE_DIR/${tier}-commands.json" <<JSON
-{
-  "commands": [
-    "aws s3 cp s3://${STATE_BUCKET}/${key} /tmp/bootstrap-${tier}.sh --region ${REGION}",
-    "sudo bash /tmp/bootstrap-${tier}.sh"
-  ]
-}
-JSON
-
-  CMD_OUTPUT=$(aws ssm send-command \
-    --document-name "AWS-RunShellScript" \
-    --parameters file://"$STATE_DIR/${tier}-commands.json" \
-    --targets "$target" \
-    --comment "${CLUSTER_NAME} bootstrap ${tier}" \
-    --region "$REGION")
-
-  CMD_ID=$(echo "$CMD_OUTPUT" | jq -r '.Command.CommandId')
-  for id in "${wait_ids[@]}"; do
-    aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "$id" --region "$REGION"
-  done
-}
-
-substitute_and_send "$STATE_DIR/storage-bootstrap.sh" "storage" "Key=tag:Tier,Values=storage" "${STORAGE_IDS[@]}"
-substitute_and_send "$STATE_DIR/stateless-bootstrap.sh" "stateless" "Key=tag:Tier,Values=stateless" "${STATELESS_IDS[@]}"
-substitute_and_send "$STATE_DIR/bench-bootstrap.sh" "bench" "Key=InstanceIds,Values=$BENCH_ID" "$BENCH_ID"
+if [[ -n "$BENCH_IP" ]]; then
+  run_remote_script "bench" "$BENCH_IP" "$bench_script"
+fi
 
 printf 'FoundationDB packages deployed and cluster file distributed. Cluster ID %s\n' "$CLUSTER_ID"
-EOF
-```
 
-Run: `bash scripts/07-bootstrap-fdb.sh`  
+EOF
+EOF
+SCRIPT
+
+storage_script="$STATE_DIR/storage-bootstrap-rendered.sh"
+stateless_script="$STATE_DIR/stateless-bootstrap-rendered.sh"
+bench_script="$STATE_DIR/bench-bootstrap-rendered.sh"
+
+render_template "$STATE_DIR/storage-bootstrap.sh" "$storage_script"
+render_template "$STATE_DIR/stateless-bootstrap.sh" "$stateless_script"
+render_template "$STATE_DIR/bench-bootstrap.sh" "$bench_script"
+
+for ip in "${STORAGE_IPS[@]}"; do
+  run_remote_script "storage" "$ip" "$storage_script"
+done
+
+STATELESS_IPS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.private_ip'))
+for ip in "${STATELESS_IPS[@]}"; do
+  run_remote_script "stateless" "$ip" "$stateless_script"
+done
+
+if [[ -n "$BENCH_IP" ]]; then
+  run_remote_script "bench" "$BENCH_IP" "$bench_script"
+fi
+
+printf 'FoundationDB packages deployed and cluster file distributed. Cluster ID %s\n' "$CLUSTER_ID"
+
+EOF
+EOF
+SCRIPT
+
+
+
+Run:
+```bash
+bash scripts/07-bootstrap-fdb.sh ~/.ssh/abdullah.pem   # or set SSH_KEY_PATH before invoking
+```
 Checkpoint artifacts: `state/fdb.cluster`, `state/cluster.json`, `s3://$STATE_BUCKET/state/fdb.cluster`, SSM `${SSM_PARAMETER_PREFIX}/config/fdb.cluster.base64`, SSM `${SSM_PARAMETER_PREFIX}/config/cluster`.
 
 ---
