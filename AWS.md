@@ -1170,11 +1170,11 @@ SSH_OPTS=(
 
 INSTANCES_JSON=$(cat "$STATE_DIR/instances.json")
 
-STORAGE_IPS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.private_ip'))
+STORAGE_IPS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.public_ip'))
 STORAGE_IDS=($(echo "$INSTANCES_JSON" | jq -r '.storage[]?.instance_id'))
 STATELESS_IDS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.instance_id'))
 BENCH_ID=$(echo "$INSTANCES_JSON" | jq -r '.bench[0]?.instance_id')
-BENCH_IP=$(echo "$INSTANCES_JSON" | jq -r '.bench[0]?.private_ip // empty')
+BENCH_IP=$(echo "$INSTANCES_JSON" | jq -r '.bench[0]?.public_ip // empty')
 
 if [ ${#STORAGE_IPS[@]} -ne 5 ]; then
   echo "Expected 5 storage nodes; found ${#STORAGE_IPS[@]}" >&2
@@ -1465,7 +1465,7 @@ for ip in "${STORAGE_IPS[@]}"; do
   run_remote_script "storage" "$ip" "$storage_script"
 done
 
-STATELESS_IPS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.private_ip'))
+STATELESS_IPS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.public_ip'))
 for ip in "${STATELESS_IPS[@]}"; do
   run_remote_script "stateless" "$ip" "$stateless_script"
 done
@@ -1477,37 +1477,7 @@ fi
 printf 'FoundationDB packages deployed and cluster file distributed. Cluster ID %s\n' "$CLUSTER_ID"
 
 EOF
-EOF
-SCRIPT
-
-storage_script="$STATE_DIR/storage-bootstrap-rendered.sh"
-stateless_script="$STATE_DIR/stateless-bootstrap-rendered.sh"
-bench_script="$STATE_DIR/bench-bootstrap-rendered.sh"
-
-render_template "$STATE_DIR/storage-bootstrap.sh" "$storage_script"
-render_template "$STATE_DIR/stateless-bootstrap.sh" "$stateless_script"
-render_template "$STATE_DIR/bench-bootstrap.sh" "$bench_script"
-
-for ip in "${STORAGE_IPS[@]}"; do
-  run_remote_script "storage" "$ip" "$storage_script"
-done
-
-STATELESS_IPS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.private_ip'))
-for ip in "${STATELESS_IPS[@]}"; do
-  run_remote_script "stateless" "$ip" "$stateless_script"
-done
-
-if [[ -n "$BENCH_IP" ]]; then
-  run_remote_script "bench" "$BENCH_IP" "$bench_script"
-fi
-
-printf 'FoundationDB packages deployed and cluster file distributed. Cluster ID %s\n' "$CLUSTER_ID"
-
-EOF
-EOF
-SCRIPT
-
-
+```
 
 Run:
 ```bash
