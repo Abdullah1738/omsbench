@@ -1127,6 +1127,7 @@ Downloads the required RPMs directly from the 7.3.69 release, formats NVMe stora
 
 > Ensure SSH access is configured (see Step 03 for `SSH_ALLOWED_CIDR`) and provide the EC2 private key via `SSH_KEY_PATH` or as the first argument when invoking the script (for example, `bash scripts/07-bootstrap-fdb.sh ~/.ssh/abdullah.pem`).
 > FoundationDB Go bindings are not yet compatible with Go toolchains newer than 1.21; leave `GO_VERSION` at 1.21.7 (the default above) or the bootstrap will fail when compiling the benchmark.
+> Pass `--start-tier=bench` (or `stateless`) to skip earlier tiers when iterating on later stages.
 
 ```bash
 cat <<'EOF' > scripts/07-bootstrap-fdb.sh
@@ -1144,14 +1145,61 @@ log() {
   printf '%s\n' "$*" >&2
 }
 
-KEY_ARG=${1:-}
+usage() {
+  cat <<'USAGE'
+Usage: 07-bootstrap-fdb.sh [--start-tier storage|stateless|bench] [SSH_KEY_PATH]
+
+Options:
+  --start-tier TIER   Resume bootstrap from the specified tier (default: storage).
+                      stateless skips storage nodes; bench skips storage and stateless.
+  -h, --help          Show this help text.
+
+Any positional argument after the options is treated as the SSH key path.
+USAGE
+}
+
+START_TIER="storage"
+KEY_ARG=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --start-tier)
+      shift || { usage >&2; exit 1; }
+      START_TIER="${1:-}"
+      ;;
+    --start-tier=*)
+      START_TIER="${1#*=}"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      if [[ -z "$KEY_ARG" ]]; then
+        KEY_ARG="$1"
+      else
+        echo "Unexpected positional argument: $1" >&2
+        usage >&2
+        exit 1
+      fi
+      ;;
+  esac
+  shift
+done
+
 if [[ -n "$KEY_ARG" ]]; then
   SSH_KEY_PATH="$KEY_ARG"
 fi
 
 if [[ -z "${SSH_KEY_PATH:-}" ]]; then
-  echo "Usage: $0 /path/to/private-key" >&2
-  echo "       or export SSH_KEY_PATH before running." >&2
+  usage >&2
+  echo >&2
+  echo "Set SSH_KEY_PATH or pass it as an argument." >&2
   exit 1
 fi
 
@@ -1159,6 +1207,28 @@ if [[ ! -f "$SSH_KEY_PATH" ]]; then
   echo "SSH key $SSH_KEY_PATH not found." >&2
   exit 1
 fi
+
+case "$START_TIER" in
+  storage)
+    RUN_STORAGE=1
+    RUN_STATELESS=1
+    RUN_BENCH=1
+    ;;
+  stateless)
+    RUN_STORAGE=0
+    RUN_STATELESS=1
+    RUN_BENCH=1
+    ;;
+  bench)
+    RUN_STORAGE=0
+    RUN_STATELESS=0
+    RUN_BENCH=1
+    ;;
+  *)
+    echo "Invalid --start-tier value: $START_TIER (expected storage, stateless, or bench)" >&2
+    exit 1
+    ;;
+esac
 
 SSH_USER=${SSH_USER:-ec2-user}
 SSH_OPTS=(
@@ -1484,6 +1554,47 @@ go build ./internal/bench
 cat <<EOF >/opt/bench/.bench.env
 export FDB_CLUSTER_FILE=/etc/foundationdb/fdb.cluster
 export BENCH_NAMESPACE=$BENCH_NAMESPACE
+EOF
+SCRIPT
+
+storage_script="$STATE_DIR/storage-bootstrap-rendered.sh"
+stateless_script="$STATE_DIR/stateless-bootstrap-rendered.sh"
+bench_script="$STATE_DIR/bench-bootstrap-rendered.sh"
+
+render_template "$STATE_DIR/storage-bootstrap.sh" "$storage_script"
+render_template "$STATE_DIR/stateless-bootstrap.sh" "$stateless_script"
+render_template "$STATE_DIR/bench-bootstrap.sh" "$bench_script"
+
+if [ "$RUN_STORAGE" -eq 1 ]; then
+  for ip in "${STORAGE_IPS[@]}"; do
+    run_remote_script "storage" "$ip" "$storage_script"
+  done
+else
+  log "Skipping storage tier (start-tier=$START_TIER)"
+fi
+
+STATELESS_IPS=($(echo "$INSTANCES_JSON" | jq -r '.stateless[]?.public_ip'))
+if [ "$RUN_STATELESS" -eq 1 ]; then
+  for ip in "${STATELESS_IPS[@]}"; do
+    run_remote_script "stateless" "$ip" "$stateless_script"
+  done
+else
+  log "Skipping stateless tier (start-tier=$START_TIER)"
+fi
+
+if [[ -n "$BENCH_IP" ]]; then
+  if [ "$RUN_BENCH" -eq 1 ]; then
+    run_remote_script "bench" "$BENCH_IP" "$bench_script"
+  else
+    log "Skipping bench tier (start-tier=$START_TIER)"
+  fi
+else
+  log "No bench instance detected; skipping bench bootstrap"
+fi
+
+printf 'FoundationDB packages deployed and cluster file distributed. Cluster ID %s\n' "$CLUSTER_ID"
+
+EOF
 EOF
 SCRIPT
 

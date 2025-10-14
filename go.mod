@@ -1,11 +1,11 @@
 module github.com/Abdullah1738/omsbench
 
-go 1.21
+go 1.24.0
 
 require (
 	github.com/apple/foundationdb/bindings/go v0.0.0-20240109210631-75ac4f2fbfac
 	github.com/prometheus/client_golang v1.23.2
-	golang.org/x/time v0.14.0
+	golang.org/x/time v0.12.0
 )
 
 require (
