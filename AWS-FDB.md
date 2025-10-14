@@ -385,7 +385,7 @@ kubectl -n foundationdb-system rollout status deployment/fdb-kubernetes-operator
 kubectl -n foundationdb-system logs -f -l app=fdb-kubernetes-operator-controller-manager --container=manager
 ```
 
-Monitor the operator logs until the controller reports it is watching the cluster. When you later change a `FoundationDBCluster`, ensure `status.generations.reconciled` catches up with `metadata.generation` before proceeding to the next step.citeturn0search2
+Monitor the operator logs until the controller reports it is watching the cluster. When you later change a `FoundationDBCluster`, ensure `status.generations.reconciled` catches up with `metadata.generation` before proceeding to the next step.
 
 ---
 
