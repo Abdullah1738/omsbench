@@ -62,7 +62,7 @@ DDB_TABLE=${DDB_TABLE:-fdb-${CLUSTER_NAME}-${ENV_ID}-lock}
 KMS_ALIAS=${KMS_ALIAS:-alias/${CLUSTER_NAME}-kms}
 FLOW_LOG_GROUP=${FLOW_LOG_GROUP:-/aws/vpcflow/${CLUSTER_NAME}}
 SSM_PARAMETER_PREFIX=${SSM_PARAMETER_PREFIX:-/foundationdb/${CLUSTER_NAME}}
-GO_VERSION=${GO_VERSION:-1.23.2}
+GO_VERSION=${GO_VERSION:-1.21.7}
 
 cat >"$STATE_DIR/env.sh" <<ENV
 export REGION=$REGION
@@ -1126,6 +1126,7 @@ Checkpoint artifacts: `state/instances.json`, `s3://$STATE_BUCKET/state/instance
 Downloads the required RPMs directly from the 7.3.69 release, formats NVMe storage, writes `foundationdb.conf`, and distributes the cluster file across storage/stateless/benchmark nodes.
 
 > Ensure SSH access is configured (see Step 03 for `SSH_ALLOWED_CIDR`) and provide the EC2 private key via `SSH_KEY_PATH` or as the first argument when invoking the script (for example, `bash scripts/07-bootstrap-fdb.sh ~/.ssh/abdullah.pem`).
+> FoundationDB Go bindings are not yet compatible with Go toolchains newer than 1.21; leave `GO_VERSION` at 1.21.7 (the default above) or the bootstrap will fail when compiling the benchmark.
 
 ```bash
 cat <<'EOF' > scripts/07-bootstrap-fdb.sh
@@ -1307,8 +1308,11 @@ for dev in $(ls /dev/nvme*n1 2>/dev/null); do
     echo "Skipping $dev (has partitions)"
     continue
   fi
-  if findmnt -rn -S "$dev" >/dev/null 2>&1; then
-    echo "Skipping $dev (already mounted)"
+  if mount_point=$(findmnt -rn -S "$dev" -o TARGET 2>/dev/null); then
+    echo "Reusing $dev mounted at $mount_point"
+    if [ -z "$DATA_MOUNT" ]; then
+      DATA_MOUNT="$mount_point"
+    fi
     continue
   fi
 
@@ -1469,7 +1473,14 @@ fi
 cd /opt/bench
 git fetch origin "$BENCH_REPO_REF"
 git checkout "$BENCH_REPO_REF"
-PATH=/usr/local/go/bin:$PATH go build ./internal/bench
+if [ -f go.mod ]; then
+  sed -i 's/^go .*/go 1.21/' go.mod
+fi
+export PATH=/usr/local/go/bin:$PATH
+export GOTOOLCHAIN=local
+export CGO_ENABLED=1
+go env -w GOTOOLCHAIN=local >/dev/null 2>&1 || true
+go build ./internal/bench
 cat <<EOF >/opt/bench/.bench.env
 export FDB_CLUSTER_FILE=/etc/foundationdb/fdb.cluster
 export BENCH_NAMESPACE=$BENCH_NAMESPACE

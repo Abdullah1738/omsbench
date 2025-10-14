@@ -1,6 +1,6 @@
 module github.com/Abdullah1738/omsbench
 
-go 1.24.7
+go 1.21
 
 require (
 	github.com/apple/foundationdb/bindings/go v0.0.0-20240109210631-75ac4f2fbfac
