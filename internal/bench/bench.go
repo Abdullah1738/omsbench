@@ -16,6 +16,7 @@ import (
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	dto "github.com/prometheus/client_model/go"
 	"golang.org/x/time/rate"
 )
 
@@ -25,7 +26,7 @@ const DefaultAPIVersion = 730
 
 const (
 	accountSpace             = 10_000_000
-	instrumentSpan           = 100_000
+	instrumentSpan           = 1_000
 	initialAccountLiquidity  = 1_000_000_000 // synthetic baseline to avoid reserve starvation
 	progressLogInterval      = 10 * time.Second
 	defaultDirectoryFragment = "omsbench"
@@ -185,6 +186,16 @@ func RunBenchmark(ctx context.Context, cfg RunConfig) error {
 	f := failureCount.Load()
 	actualTPS := float64(s) / cfg.Duration.Seconds()
 	cfg.Logger.Printf("benchmark complete: success=%d failure=%d achievedTPS=%.0f", s, f, actualTPS)
+
+	if quantiles, err := gatherLatencyQuantiles(cfg.Registry, "omsbench_tx_seconds", []float64{0.10, 0.50, 0.99}); err != nil {
+		cfg.Logger.Printf("latency quantiles unavailable: %v", err)
+	} else if len(quantiles) > 0 {
+		cfg.Logger.Printf("latency quantiles: p10=%.2fms p50=%.2fms p99=%.2fms",
+			quantiles[0.10]*1000,
+			quantiles[0.50]*1000,
+			quantiles[0.99]*1000,
+		)
+	}
 
 	if err := runCtx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return err
@@ -629,4 +640,100 @@ func normalizeDirectory(parts []string) []string {
 		return []string{defaultDirectoryFragment}
 	}
 	return out
+}
+
+func gatherLatencyQuantiles(reg *prometheus.Registry, metricName string, quantiles []float64) (map[float64]float64, error) {
+	if reg == nil {
+		return nil, errors.New("prometheus registry is required")
+	}
+
+	families, err := reg.Gather()
+	if err != nil {
+		return nil, fmt.Errorf("gather metrics: %w", err)
+	}
+
+	var histogram *dto.Histogram
+	for _, fam := range families {
+		if fam == nil || fam.GetName() != metricName {
+			continue
+		}
+		for _, metric := range fam.GetMetric() {
+			if metric.GetHistogram() == nil {
+				continue
+			}
+			histogram = metric.GetHistogram()
+			break
+		}
+		if histogram != nil {
+			break
+		}
+	}
+
+	if histogram == nil || histogram.GetSampleCount() == 0 {
+		return map[float64]float64{}, nil
+	}
+
+	total := histogram.GetSampleCount()
+	buckets := histogram.GetBucket()
+
+	out := make(map[float64]float64, len(quantiles))
+	for _, q := range quantiles {
+		switch {
+		case q <= 0:
+			out[q] = 0
+		case q >= 1:
+			out[q] = histogram.GetSampleSum() / float64(total)
+		default:
+			out[q] = approximateHistogramQuantile(buckets, q, total)
+		}
+	}
+	return out, nil
+}
+
+func approximateHistogramQuantile(buckets []*dto.Bucket, quantile float64, total uint64) float64 {
+	if len(buckets) == 0 || total == 0 {
+		return 0
+	}
+
+	target := quantile * float64(total)
+	if target <= 1 {
+		target = 1
+	}
+
+	var (
+		prevUpper float64
+		prevCount uint64
+	)
+
+	for _, b := range buckets {
+		cumulative := b.GetCumulativeCount()
+		if float64(cumulative) >= target {
+			lowerBound := prevUpper
+			upperBound := b.GetUpperBound()
+			countInBucket := cumulative - prevCount
+			if countInBucket == 0 {
+				if math.IsInf(upperBound, 1) {
+					return lowerBound
+				}
+				return upperBound
+			}
+
+			if math.IsInf(upperBound, 1) {
+				return lowerBound
+			}
+
+			fraction := (target - float64(prevCount)) / float64(countInBucket)
+			if fraction < 0 {
+				fraction = 0
+			} else if fraction > 1 {
+				fraction = 1
+			}
+			return lowerBound + fraction*(upperBound-lowerBound)
+		}
+
+		prevUpper = b.GetUpperBound()
+		prevCount = cumulative
+	}
+
+	return prevUpper
 }

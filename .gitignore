@@ -8,3 +8,5 @@ abdullah.pem
 /logs
 typescript
 /bin
+fdb_health_check.sh
+deploy.md
